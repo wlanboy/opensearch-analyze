@@ -7,16 +7,43 @@ instead of writing documents back into OpenSearch.
 """
 
 import argparse
+import base64
+import getpass
 import json
 import os
+import ssl
 import sys
 import textwrap
 import time
 from datetime import datetime
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
+
+def _load_dotenv() -> None:
+    """Load KEY=VALUE lines from a .env file next to this script into
+    os.environ, without overriding variables the shell already set."""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    try:
+        with open(env_path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_dotenv()
+
 DEFAULT_HOST = os.environ.get("OPENSEARCH_HOST", "http://localhost:9200")
+DEFAULT_USER = os.environ.get("OPENSEARCH_USER")
+DEFAULT_PASSWORD = os.environ.get("OPENSEARCH_PASSWORD")
+DEFAULT_CA_CERT = os.environ.get("OPENSEARCH_CA_CERT")
+DEFAULT_INSECURE = os.environ.get("OPENSEARCH_INSECURE", "").strip().lower() in ("1", "true", "yes")
 
 HEAP_WARN_PERCENT = 85
 DISK_WATERMARK_DEFAULT_LOW = 85.0
@@ -28,10 +55,35 @@ QUERY_COLUMN_WRAP = 80
 SLOW_QUERY_WARN_MS = 1000
 
 
-def fetch_json(host: str, path: str, timeout: float = 10.0) -> dict:
-    url = f"{host}{path}"
-    with urlopen(url, timeout=timeout) as resp:
-        return json.load(resp)
+class OpenSearchClient:
+    """Wraps host + auth + TLS settings so collectors don't juggle them individually."""
+
+    def __init__(self, host: str, username: str = None, password: str = None,
+                 verify_tls: bool = True, ca_cert: str = None, timeout: float = 10.0):
+        self.host = host
+        self.timeout = timeout
+
+        self._auth_header = None
+        if username:
+            token = base64.b64encode(f"{username}:{password or ''}".encode()).decode()
+            self._auth_header = f"Basic {token}"
+
+        self._ssl_context = None
+        if host.startswith("https://"):
+            if ca_cert:
+                self._ssl_context = ssl.create_default_context(cafile=ca_cert)
+            elif not verify_tls:
+                self._ssl_context = ssl._create_unverified_context()
+
+    def get(self, path: str) -> dict:
+        req = Request(f"{self.host}{path}")
+        if self._auth_header:
+            req.add_header("Authorization", self._auth_header)
+        kwargs = {"timeout": self.timeout}
+        if self._ssl_context is not None:
+            kwargs["context"] = self._ssl_context
+        with urlopen(req, **kwargs) as resp:
+            return json.load(resp)
 
 
 def format_bytes(n: float) -> str:
@@ -49,8 +101,8 @@ def format_ms(n: float) -> str:
     return f"{n:.0f}ms"
 
 
-def collect_cluster_health(host: str) -> dict:
-    data = fetch_json(host, "/_cluster/health")
+def collect_cluster_health(client: OpenSearchClient) -> dict:
+    data = client.get("/_cluster/health")
     return {
         "status": data.get("status"),
         "number_of_nodes": data.get("number_of_nodes"),
@@ -61,8 +113,8 @@ def collect_cluster_health(host: str) -> dict:
     }
 
 
-def collect_index_stats(host: str) -> list:
-    data = fetch_json(host, "/_stats/search,indexing,store,docs,merge,query_cache,request_cache")
+def collect_index_stats(client: OpenSearchClient) -> list:
+    data = client.get("/_stats/search,indexing,store,docs,merge,query_cache,request_cache")
     indices = data.get("indices", {})
     rows = []
 
@@ -113,8 +165,8 @@ def collect_index_stats(host: str) -> list:
     return rows
 
 
-def collect_node_stats(host: str) -> list:
-    data = fetch_json(host, "/_nodes/stats/thread_pool,jvm,breaker,fs")
+def collect_node_stats(client: OpenSearchClient) -> list:
+    data = client.get("/_nodes/stats/thread_pool,jvm,breaker,fs")
     nodes = data.get("nodes", {})
     rows = []
 
@@ -164,9 +216,9 @@ def parse_watermark_percent(value) -> float:
         return None
 
 
-def collect_disk_watermarks(host: str) -> dict:
+def collect_disk_watermarks(client: OpenSearchClient) -> dict:
     """Effective disk allocation watermarks (persistent/transient override defaults)."""
-    data = fetch_json(host, "/_cluster/settings?include_defaults=true")
+    data = client.get("/_cluster/settings?include_defaults=true")
 
     def watermark_block(scope):
         return data.get(scope, {}).get("cluster", {}).get("routing", {}) \
@@ -186,16 +238,16 @@ def collect_disk_watermarks(host: str) -> dict:
     }
 
 
-def collect_top_queries(host: str, query_type: str = "latency", limit: int = 10):
+def collect_top_queries(client: OpenSearchClient, query_type: str = "latency", limit: int = 10):
     """Long-running / expensive queries via the Query Insights plugin.
 
     Returns None if the plugin isn't installed/enabled on the target cluster
     (the endpoint 404s or is rejected), so the report can degrade gracefully.
     """
     try:
-        data = fetch_json(host, f"/_insights/top_queries?type={query_type}&verbose=true")
+        data = client.get(f"/_insights/top_queries?type={query_type}&verbose=true")
     except HTTPError as exc:
-        if exc.code in (400, 404):
+        if exc.code in (400, 403, 404):
             return None
         raise
 
@@ -387,18 +439,34 @@ def print_report(host: str, cluster: dict, indices: list, nodes: list, top_queri
     print()
 
 
-def run_once(host: str, as_json: bool, query_type: str, query_limit: int) -> int:
+def run_once(client: OpenSearchClient, as_json: bool, query_type: str, query_limit: int) -> int:
     try:
-        cluster = collect_cluster_health(host)
-        indices = collect_index_stats(host)
-        nodes = collect_node_stats(host)
-        watermarks = collect_disk_watermarks(host)
-        top_queries = collect_top_queries(host, query_type, query_limit) if query_limit > 0 else None
+        cluster = collect_cluster_health(client)
+        indices = collect_index_stats(client)
+        nodes = collect_node_stats(client)
+        watermarks = collect_disk_watermarks(client)
+        top_queries = collect_top_queries(client, query_type, query_limit) if query_limit > 0 else None
     except HTTPError as exc:
-        print(f"OpenSearch returned HTTP {exc.code} for {exc.url}: {exc.read().decode(errors='replace')[:200]}", file=sys.stderr)
+        if exc.code in (401, 403):
+            print(
+                f"OpenSearch rejected the request with HTTP {exc.code} for {exc.url} — "
+                f"the security plugin is likely active; pass --user/--password (or OPENSEARCH_USER/"
+                f"OPENSEARCH_PASSWORD)",
+                file=sys.stderr,
+            )
+        else:
+            print(f"OpenSearch returned HTTP {exc.code} for {exc.url}: {exc.read().decode(errors='replace')[:200]}", file=sys.stderr)
         return 1
     except URLError as exc:
-        print(f"Cannot reach OpenSearch at {host}: {exc.reason}", file=sys.stderr)
+        if isinstance(exc.reason, ssl.SSLCertVerificationError):
+            print(
+                f"TLS certificate verification failed for {client.host}: {exc.reason} — "
+                f"pass --ca-cert <path> for a self-signed cluster CA, or --insecure to skip verification "
+                f"(not recommended outside local/dev use)",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Cannot reach OpenSearch at {client.host}: {exc.reason}", file=sys.stderr)
         return 1
 
     if as_json:
@@ -412,7 +480,7 @@ def run_once(host: str, as_json: bool, query_type: str, query_limit: int) -> int
             "findings": build_findings(cluster, indices, nodes, top_queries, watermarks),
         }, indent=2))
     else:
-        print_report(host, cluster, indices, nodes, top_queries, query_limit, watermarks)
+        print_report(client.host, cluster, indices, nodes, top_queries, query_limit, watermarks)
 
     return 0
 
@@ -427,14 +495,36 @@ def main() -> int:
                          help="Rank long-running queries by this metric via the Query Insights plugin (default: latency)")
     parser.add_argument("--long-queries-limit", type=int, default=10,
                          help="Number of long-running queries to show, 0 to disable this section (default: 10)")
+    parser.add_argument("--user", "-u", default=DEFAULT_USER,
+                         help="Basic-auth username for clusters with the security plugin enabled (env OPENSEARCH_USER)")
+    parser.add_argument("--password", default=DEFAULT_PASSWORD,
+                         help="Basic-auth password (env OPENSEARCH_PASSWORD); if --user is set without this, "
+                              "you'll be prompted")
+    parser.add_argument("--ca-cert", default=DEFAULT_CA_CERT,
+                         help="Path to a CA bundle for verifying a self-signed TLS certificate (env OPENSEARCH_CA_CERT)")
+    parser.add_argument("--insecure", "-k", action="store_true", default=DEFAULT_INSECURE,
+                         help="Skip TLS certificate verification (env OPENSEARCH_INSECURE); use only for local/dev "
+                              "self-signed setups")
     args = parser.parse_args()
 
+    password = args.password
+    if args.user and not password:
+        password = getpass.getpass(f"Password for {args.user}: ")
+
+    client = OpenSearchClient(
+        args.host,
+        username=args.user,
+        password=password,
+        verify_tls=not args.insecure,
+        ca_cert=args.ca_cert,
+    )
+
     if not args.watch:
-        return run_once(args.host, args.json, args.long_queries_type, args.long_queries_limit)
+        return run_once(client, args.json, args.long_queries_type, args.long_queries_limit)
 
     try:
         while True:
-            run_once(args.host, args.json, args.long_queries_type, args.long_queries_limit)
+            run_once(client, args.json, args.long_queries_type, args.long_queries_limit)
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\nStopped.")
