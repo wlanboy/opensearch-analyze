@@ -9,7 +9,7 @@ services:
       - cluster.initial_cluster_manager_nodes=opensearch-1,opensearch-2
       - bootstrap.memory_lock=true
       - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
-      - DISABLE_SECURITY_PLUGIN=true
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_INITIAL_ADMIN_PASSWORD:?Bitte OPENSEARCH_INITIAL_ADMIN_PASSWORD in .env setzen (siehe .env-example)}
     ulimits:
       memlock:
         soft: -1
@@ -23,7 +23,7 @@ services:
       - "9200:9200"
       - "9600:9600"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sfk -u admin:$$OPENSEARCH_INITIAL_ADMIN_PASSWORD https://localhost:9200/_cluster/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -38,7 +38,7 @@ services:
       - cluster.initial_cluster_manager_nodes=opensearch-1,opensearch-2
       - bootstrap.memory_lock=true
       - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
-      - DISABLE_SECURITY_PLUGIN=true
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_INITIAL_ADMIN_PASSWORD:?Bitte OPENSEARCH_INITIAL_ADMIN_PASSWORD in .env setzen (siehe .env-example)}
     ulimits:
       memlock:
         soft: -1
@@ -52,7 +52,7 @@ services:
       - "9201:9200"
       - "9601:9600"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sfk -u admin:$$OPENSEARCH_INITIAL_ADMIN_PASSWORD https://localhost:9200/_cluster/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -67,6 +67,7 @@ services:
       - fluent-bit-db:/fluent-bit/db
     environment:
       - HOSTNAME
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD
     depends_on:
       opensearch-1:
         condition: service_healthy
@@ -80,7 +81,7 @@ services:
     ports:
       - "5601:5601"
     environment:
-      - OPENSEARCH_HOSTS=["http://opensearch-1:9200","http://opensearch-2:9200"]
+      - OPENSEARCH_HOSTS=["https://opensearch-1:9200","https://opensearch-2:9200"]
       - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
     depends_on:
       opensearch-1:
