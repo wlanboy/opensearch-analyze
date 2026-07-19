@@ -3,7 +3,21 @@
 # (/_insights/top_queries) has data for opensearch-analyze.py --long-queries-*.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$SCRIPT_DIR/.env"
+    set +a
+fi
+
+# stress.sh creates/deletes indices and bulk-writes documents, so — unlike
+# opensearch-analyze.py — it needs admin/write credentials, not the
+# read-only OPENSEARCH_USER that adduser.sh provisions.
 HOST="${OPENSEARCH_HOST:-http://localhost:9200}"
+AUTH_USER="admin"
+AUTH_PASSWORD="${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-}"
+INSECURE="${OPENSEARCH_INSECURE:-false}"
 INDEX="${STRESS_INDEX:-stress-test-logs}"
 DOC_COUNT="${DOC_COUNT:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-5000}"
@@ -26,6 +40,9 @@ Options:
   --docs N           Number of documents to seed (default: $DOC_COUNT)
   --rounds N         Query rounds per query type (default: $QUERY_ROUNDS)
   --parallel N       Concurrent queries per round (default: $PARALLEL)
+  --user NAME        Basic-auth user (default: admin — needs write access to create/seed indices)
+  --password PASS    Basic-auth password (default: \$OPENSEARCH_INITIAL_ADMIN_PASSWORD)
+  --insecure         Skip TLS certificate verification (default: \$OPENSEARCH_INSECURE)
   --skip-seed        Reuse an already-seeded index, skip document generation
   --cleanup          Delete the stress index and exit
   -h, --help         Show this help
@@ -42,6 +59,9 @@ while [ $# -gt 0 ]; do
         --docs) DOC_COUNT="$2"; shift 2 ;;
         --rounds) QUERY_ROUNDS="$2"; shift 2 ;;
         --parallel) PARALLEL="$2"; shift 2 ;;
+        --user) AUTH_USER="$2"; shift 2 ;;
+        --password) AUTH_PASSWORD="$2"; shift 2 ;;
+        --insecure) INSECURE="true"; shift ;;
         --skip-seed) SKIP_SEED=1; shift ;;
         --cleanup) CLEANUP=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -49,18 +69,22 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+CURL_OPTS=(-s)
+[ "$INSECURE" = "true" ] && CURL_OPTS+=(-k)
+[ -n "$AUTH_PASSWORD" ] && CURL_OPTS+=(-u "$AUTH_USER:$AUTH_PASSWORD")
+
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 if [ "$CLEANUP" -eq 1 ]; then
     echo "Deleting index $INDEX on $HOST"
-    curl -s -X DELETE "$HOST/$INDEX" -o /dev/null -w '  -> HTTP %{http_code}\n'
+    curl "${CURL_OPTS[@]}" -X DELETE "$HOST/$INDEX" -o /dev/null -w '  -> HTTP %{http_code}\n'
     exit 0
 fi
 
 enable_query_insights() {
     echo "Enabling Query Insights top_queries collection..."
-    curl -s -X PUT "$HOST/_cluster/settings" \
+    curl "${CURL_OPTS[@]}" -X PUT "$HOST/_cluster/settings" \
         -H 'Content-Type: application/json' \
         -d '{
               "persistent": {
@@ -79,7 +103,7 @@ enable_query_insights() {
 
 create_index() {
     echo "Creating index $INDEX..."
-    curl -s -X PUT "$HOST/$INDEX" \
+    curl "${CURL_OPTS[@]}" -X PUT "$HOST/$INDEX" \
         -H 'Content-Type: application/json' \
         -d '{
               "settings": {"number_of_shards": 2, "number_of_replicas": 1},
@@ -124,12 +148,12 @@ seed_data() {
     split -l "$((BATCH_SIZE * 2))" "$WORKDIR/bulk.ndjson" "$WORKDIR/batch_"
 
     for batch in "$WORKDIR"/batch_*; do
-        curl -s -X POST "$HOST/$INDEX/_bulk" \
+        curl "${CURL_OPTS[@]}" -X POST "$HOST/$INDEX/_bulk" \
             -H 'Content-Type: application/x-ndjson' \
             --data-binary "@$batch" -o /dev/null -w '  bulk -> HTTP %{http_code}\n'
     done
 
-    curl -s -X POST "$HOST/$INDEX/_refresh" -o /dev/null
+    curl "${CURL_OPTS[@]}" -X POST "$HOST/$INDEX/_refresh" -o /dev/null
     echo "Seeding done."
 }
 
@@ -145,7 +169,7 @@ QUERY_FUZZY='{"query":{"multi_match":{"query":"netwrok conection eror latancy","
 
 run_query() {
     local body="$1"
-    curl -s -X POST "$HOST/$INDEX/_search" \
+    curl "${CURL_OPTS[@]}" -X POST "$HOST/$INDEX/_search" \
         -H 'Content-Type: application/json' \
         -d "$body" -o /dev/null -w '  query -> HTTP %{http_code}, took %{time_total}s\n'
 }
