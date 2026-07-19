@@ -41,7 +41,7 @@ docker compose up -d
 ## opensearch-analyze.py
 
 Analysiert Cluster-Health, Index-Stats (Search/Indexing/Store/Docs/Merge/Caches) und
-Node-Health (Heap, Cache-Hit-Ratio, langsame Queries) über die OpenSearch-REST-API.
+Node-Health (Heap, Disk-Watermarks, Cache-Hit-Ratio, langsame Queries) über die OpenSearch-REST-API.
 
 ```bash
 ./opensearch-analyze.py --host http://localhost:9200

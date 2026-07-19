@@ -19,6 +19,9 @@ from urllib.error import URLError, HTTPError
 DEFAULT_HOST = os.environ.get("OPENSEARCH_HOST", "http://localhost:9200")
 
 HEAP_WARN_PERCENT = 85
+DISK_WATERMARK_DEFAULT_LOW = 85.0
+DISK_WATERMARK_DEFAULT_HIGH = 90.0
+DISK_WATERMARK_DEFAULT_FLOOD = 95.0
 CACHE_SAMPLE_MIN = 100
 CACHE_HIT_RATIO_WARN = 50.0
 QUERY_COLUMN_WRAP = 80
@@ -111,7 +114,7 @@ def collect_index_stats(host: str) -> list:
 
 
 def collect_node_stats(host: str) -> list:
-    data = fetch_json(host, "/_nodes/stats/thread_pool,jvm,breaker")
+    data = fetch_json(host, "/_nodes/stats/thread_pool,jvm,breaker,fs")
     nodes = data.get("nodes", {})
     rows = []
 
@@ -120,6 +123,13 @@ def collect_node_stats(host: str) -> list:
         search_pool = node.get("thread_pool", {}).get("search", {})
         heap = node.get("jvm", {}).get("mem", {})
         breakers = node.get("breakers", {})
+        fs_total = node.get("fs", {}).get("total", {})
+
+        disk_total_bytes = fs_total.get("total_in_bytes", 0)
+        disk_available_bytes = fs_total.get("available_in_bytes", 0)
+        disk_used_percent = (
+            (disk_total_bytes - disk_available_bytes) * 100.0 / disk_total_bytes if disk_total_bytes else 0.0
+        )
 
         rows.append({
             "node": name,
@@ -129,12 +139,51 @@ def collect_node_stats(host: str) -> list:
             "heap_used_percent": heap.get("heap_used_percent", 0),
             "heap_used_bytes": heap.get("heap_used_in_bytes", 0),
             "heap_max_bytes": heap.get("heap_max_in_bytes", 0),
+            "disk_used_percent": disk_used_percent,
+            "disk_available_bytes": disk_available_bytes,
+            "disk_total_bytes": disk_total_bytes,
             "breaker_parent_tripped": breakers.get("parent", {}).get("tripped", 0),
             "breaker_fielddata_tripped": breakers.get("fielddata", {}).get("tripped", 0),
             "breaker_request_tripped": breakers.get("request", {}).get("tripped", 0),
         })
 
     return sorted(rows, key=lambda r: r["node"])
+
+
+def parse_watermark_percent(value) -> float:
+    """Parst eine Disk-Watermark-Einstellung als Prozent-Schwellwert, oder None,
+    wenn sie als absolute Größe (z.B. "50gb") statt als Prozentwert konfiguriert ist."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text.endswith("%"):
+        return None
+    try:
+        return float(text[:-1])
+    except ValueError:
+        return None
+
+
+def collect_disk_watermarks(host: str) -> dict:
+    """Effektive Disk-Allocation-Watermarks (persistent/transient überschreiben Defaults)."""
+    data = fetch_json(host, "/_cluster/settings?include_defaults=true")
+
+    def watermark_block(scope):
+        return data.get(scope, {}).get("cluster", {}).get("routing", {}) \
+            .get("allocation", {}).get("disk", {}).get("watermark", {})
+
+    persistent = watermark_block("persistent")
+    transient = watermark_block("transient")
+    defaults = watermark_block("defaults")
+
+    def pick(key):
+        return transient.get(key) or persistent.get(key) or defaults.get(key)
+
+    return {
+        "low": parse_watermark_percent(pick("low")),
+        "high": parse_watermark_percent(pick("high")),
+        "flood_stage": parse_watermark_percent(pick("flood_stage")),
+    }
 
 
 def collect_top_queries(host: str, query_type: str = "latency", limit: int = 10):
@@ -174,8 +223,9 @@ def collect_top_queries(host: str, query_type: str = "latency", limit: int = 10)
     return rows[:limit]
 
 
-def build_findings(cluster: dict, indices: list, nodes: list, top_queries=None) -> list:
+def build_findings(cluster: dict, indices: list, nodes: list, top_queries=None, watermarks: dict = None) -> list:
     findings = []
+    watermarks = watermarks or {}
 
     if cluster.get("status") in ("yellow", "red"):
         findings.append(f"Cluster-Status ist {cluster['status'].upper()}")
@@ -190,6 +240,10 @@ def build_findings(cluster: dict, indices: list, nodes: list, top_queries=None) 
                 f"Index '{idx['index']}': niedrige Query-Cache-Trefferquote ({idx['query_cache_hit_ratio']:.1f}%)"
             )
 
+    flood_wm = watermarks.get("flood_stage")
+    high_wm = watermarks.get("high")
+    low_wm = watermarks.get("low")
+
     for node in nodes:
         if node["heap_used_percent"] >= HEAP_WARN_PERCENT:
             findings.append(f"Node '{node['node']}': JVM-Heap bei {node['heap_used_percent']}%")
@@ -198,6 +252,23 @@ def build_findings(cluster: dict, indices: list, nodes: list, top_queries=None) 
         tripped = node["breaker_parent_tripped"] + node["breaker_fielddata_tripped"] + node["breaker_request_tripped"]
         if tripped > 0:
             findings.append(f"Node '{node['node']}': Circuit Breaker {tripped} Mal ausgelöst")
+
+        disk_pct = node["disk_used_percent"]
+        if flood_wm is not None and disk_pct >= flood_wm:
+            findings.append(
+                f"Node '{node['node']}': Disk bei {disk_pct:.1f}% >= Flood-Stage-Watermark ({flood_wm:.0f}%) "
+                f"— Indizes auf diesem Node sind vermutlich auf Read-Only gesetzt"
+            )
+        elif high_wm is not None and disk_pct >= high_wm:
+            findings.append(
+                f"Node '{node['node']}': Disk bei {disk_pct:.1f}% >= High-Watermark ({high_wm:.0f}%) "
+                f"— Shards werden von diesem Node wegverlagert"
+            )
+        elif low_wm is not None and disk_pct >= low_wm:
+            findings.append(
+                f"Node '{node['node']}': Disk bei {disk_pct:.1f}% >= Low-Watermark ({low_wm:.0f}%) "
+                f"— es werden keine neuen Shards mehr auf diesen Node verteilt"
+            )
 
     if top_queries:
         slow = [q for q in top_queries if q["latency_ms"] >= SLOW_QUERY_WARN_MS]
@@ -248,10 +319,20 @@ def format_timestamp_ms(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000).strftime("%H:%M:%S")
 
 
-def print_report(host: str, cluster: dict, indices: list, nodes: list, top_queries, query_limit: int) -> None:
+def print_report(host: str, cluster: dict, indices: list, nodes: list, top_queries, query_limit: int,
+                  watermarks: dict = None) -> None:
+    watermarks = watermarks or {}
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"OpenSearch-Analyse — {host}  ({ts})")
     print("=" * 70)
+
+    def fmt_wm(v):
+        return f"{v:.0f}%" if v is not None else "n/a"
+
+    print(
+        f"Disk-Watermarks: low={fmt_wm(watermarks.get('low'))} "
+        f"high={fmt_wm(watermarks.get('high'))} flood_stage={fmt_wm(watermarks.get('flood_stage'))}"
+    )
 
     print("\nCluster")
     print_table(
@@ -274,9 +355,10 @@ def print_report(host: str, cluster: dict, indices: list, nodes: list, top_queri
 
     print(f"\nKnoten ({len(nodes)})")
     print_table(
-        ["knoten", "suche_warteschlange", "suche_abgelehnt", "suche_aktiv", "heap%", "breaker_ausloesungen"],
+        ["knoten", "suche_warteschlange", "suche_abgelehnt", "suche_aktiv", "heap%", "disk%", "breaker_ausloesungen"],
         [[
             n["node"], n["search_queue"], n["search_rejected"], n["search_active"], n["heap_used_percent"],
+            f"{n['disk_used_percent']:.1f}",
             n["breaker_parent_tripped"] + n["breaker_fielddata_tripped"] + n["breaker_request_tripped"],
         ] for n in nodes],
     )
@@ -296,7 +378,7 @@ def print_report(host: str, cluster: dict, indices: list, nodes: list, top_queri
             wrap_widths={7: QUERY_COLUMN_WRAP},
         )
 
-    findings = build_findings(cluster, indices, nodes, top_queries)
+    findings = build_findings(cluster, indices, nodes, top_queries, watermarks)
     print(f"\nBefunde ({len(findings)})")
     if findings:
         for f in findings:
@@ -311,6 +393,7 @@ def run_once(host: str, as_json: bool, query_type: str, query_limit: int) -> int
         cluster = collect_cluster_health(host)
         indices = collect_index_stats(host)
         nodes = collect_node_stats(host)
+        watermarks = collect_disk_watermarks(host)
         top_queries = collect_top_queries(host, query_type, query_limit) if query_limit > 0 else None
     except HTTPError as exc:
         print(f"OpenSearch antwortete mit HTTP {exc.code} für {exc.url}: {exc.read().decode(errors='replace')[:200]}", file=sys.stderr)
@@ -326,10 +409,11 @@ def run_once(host: str, as_json: bool, query_type: str, query_limit: int) -> int
             "indices": indices,
             "nodes": nodes,
             "top_queries": top_queries,
-            "findings": build_findings(cluster, indices, nodes, top_queries),
+            "disk_watermarks": watermarks,
+            "findings": build_findings(cluster, indices, nodes, top_queries, watermarks),
         }, indent=2))
     else:
-        print_report(host, cluster, indices, nodes, top_queries, query_limit)
+        print_report(host, cluster, indices, nodes, top_queries, query_limit, watermarks)
 
     return 0
 
