@@ -1,6 +1,11 @@
 """Turns collected cluster/index/node data into human-readable warning strings."""
 
-from .constants import CACHE_HIT_RATIO_WARN, CACHE_SAMPLE_MIN, HEAP_WARN_PERCENT, SLOW_QUERY_WARN_MS
+from .constants import (
+    CACHE_HIT_RATIO_WARN,
+    CACHE_SAMPLE_MIN,
+    HEAP_WARN_PERCENT,
+    SLOW_QUERY_WARN_MS,
+)
 from .i18n import Translator
 
 

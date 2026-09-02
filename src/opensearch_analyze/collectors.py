@@ -5,7 +5,11 @@ import json
 from urllib.error import HTTPError
 
 from .client import OpenSearchGetter
-from .constants import DISK_WATERMARK_DEFAULT_FLOOD, DISK_WATERMARK_DEFAULT_HIGH, DISK_WATERMARK_DEFAULT_LOW
+from .constants import (
+    DISK_WATERMARK_DEFAULT_FLOOD,
+    DISK_WATERMARK_DEFAULT_HIGH,
+    DISK_WATERMARK_DEFAULT_LOW,
+)
 
 
 class OpenSearchCollector:
