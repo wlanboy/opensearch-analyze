@@ -213,4 +213,4 @@ echo "  OPENSEARCH_USER=$ANALYZER_USER"
 echo "  OPENSEARCH_PASSWORD=(gespeichert, nicht angezeigt)"
 echo "  OPENSEARCH_INSECURE=$INSECURE"
 echo
-echo "opensearch-analyze.py und opensearch-analyze-d.py lesen $ENV_FILE automatisch ein."
+echo "opensearch-analyze.py liest $ENV_FILE automatisch ein (--lang de|en fuer die Berichtssprache)."
