@@ -378,7 +378,7 @@ def format_ms(n: float) -> str:
 
 
 def format_timestamp_ms(ms: int) -> str:
-    return datetime.fromtimestamp(ms / 1000).strftime("%H:%M:%S")
+    return datetime.fromtimestamp(ms / 1000).astimezone().strftime("%H:%M:%S")
 
 
 # ---------------------------------------------------------------------------
@@ -679,7 +679,7 @@ def print_report(lang: str, host: str, cluster: dict, indices: list | None, node
                   collection_errors: dict | None = None) -> None:
     collection_errors = collection_errors or {}
     watermarks = watermarks or {}
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
     print(T(lang, "report_header", host=host, ts=ts))
     print("=" * 70)
 
@@ -814,7 +814,7 @@ def run_once(client: OpenSearchGetter, lang: str, as_json: bool, query_type: str
 
     if as_json:
         print(json.dumps({
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now().astimezone().isoformat(),
             "cluster": cluster,
             "indices": indices,
             "nodes": nodes,

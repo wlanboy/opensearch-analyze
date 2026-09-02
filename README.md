@@ -63,23 +63,48 @@ Docker-Compose-Stack reicht nach `./adduser.sh` ein einfaches `./opensearch-anal
 
 ```bash
 ./opensearch-analyze.py
+./opensearch-analyze.py --lang de
 ./opensearch-analyze.py --json
 ./opensearch-analyze.py --watch --interval 15
 ./opensearch-analyze.py --long-queries-type cpu --long-queries-limit 5
 ```
 
+Die eigentliche Implementierung liegt in `src/opensearch_analyze/` (ein
+richtiges Python-Package für Tests/Typprüfung); `opensearch-analyze.py` ist
+nur ein dünner Einstiegspunkt, der das Package importiert. Gleichbedeutend:
+`uv run opensearch-analyze ...` über den in `pyproject.toml` definierten
+Console-Script-Eintrag.
+
 | Option | Beschreibung |
 |---|---|
 | `--host` | OpenSearch-Basis-URL (Default: `.env`/`$OPENSEARCH_HOST` oder `http://localhost:9200`) |
 | `--json` | Ausgabe als JSON statt Textreport |
+| `--lang` | Sprache für Bericht/CLI: `en` (Default) oder `de` (Default: `$OPENSEARCH_LANG`) |
 | `--watch` | Wiederholte Ausführung im Intervall |
 | `--interval` | Sekunden zwischen zwei Läufen im `--watch`-Modus (Default: 10) |
 | `--long-queries-type` | Sortierkriterium für langsame Queries: `latency`, `cpu`, `memory` |
 | `--long-queries-limit` | Anzahl der angezeigten langsamen Queries |
-| `--user`, `-u` | Basic-Auth-Benutzername, falls das Security-Plugin aktiv ist (Default: `.env`/`$OPENSEARCH_USER`) |
+| `--user`, `-u` | Basic-Auth-Benutzername, falls das Security-Plugin aktiv ist (Default: `.env`/`$OPENSEARCH_USER`); schließt `--api-key`/`--bearer-token` aus |
 | `--password` | Basic-Auth-Passwort (Default: `.env`/`$OPENSEARCH_PASSWORD`); bei `--user` ohne Passwort wird interaktiv nachgefragt |
+| `--api-key` | API-Key-Credential `id:secret` oder bereits kodiertes Token, gesendet als `Authorization: ApiKey ...` (Default: `.env`/`$OPENSEARCH_API_KEY`); schließt `--user`/`--bearer-token` aus |
+| `--bearer-token` | Bearer-/JWT-Token, gesendet als `Authorization: Bearer ...` (Default: `.env`/`$OPENSEARCH_BEARER_TOKEN`); schließt `--user`/`--api-key` aus |
 | `--ca-cert` | Pfad zu einem CA-Bundle für ein selbstsigniertes TLS-Zertifikat (Default: `.env`/`$OPENSEARCH_CA_CERT`) |
 | `--insecure`, `-k` | TLS-Zertifikatsprüfung überspringen (Default: `.env`/`$OPENSEARCH_INSECURE`); nur für lokale/Dev-Setups |
+
+**Exit-Codes** (für Cron/Monitoring-Integration): `0` = sauberer Bericht ohne
+Befunde, `1` = Cluster nicht erreichbar/Auth fehlgeschlagen (kein Bericht
+möglich), `2` = Bericht erstellt, aber mit Befunden (inkl. teilweise
+fehlgeschlagener Datensammlung, z. B. wenn ein einzelner Endpunkt 403
+zurückgibt).
+
+## Entwicklung
+
+```bash
+uv sync                # Dev-Dependencies installieren (pytest, pyright, ruff)
+uv run pytest          # Unit-Tests
+uv run pyright         # Typprüfung
+uv run ruff check --fix   # Linting
+```
 
 ## adduser.sh
 
