@@ -1,0 +1,24 @@
+[project]
+name = "opensearch-analyze"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "wlanboy", email = "wlanboy@githumb.com" }
+]
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+opensearch-analyze = "opensearch_analyze:main"
+
+[build-system]
+requires = ["uv_build>=0.12.8,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+    "pytest>=9.1.1",
+    "ruff>=0.16.5",
+]
