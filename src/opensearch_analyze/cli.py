@@ -19,35 +19,51 @@ from .findings import FindingsBuilder
 from .i18n import Translator
 from .report import ReportPrinter
 
+# Project root of a source checkout (src/opensearch_analyze/cli.py -> ../..):
+# where adduser.sh writes its .env, so the tool finds it from any directory.
+PROJECT_DIR = Path(__file__).resolve().parents[2]
 
-def _load_dotenv() -> None:
-    """Load KEY=VALUE lines from a .env file in the current working
-    directory into os.environ, without overriding variables the shell
-    already set."""
-    env_path = Path.cwd() / ".env"
+
+def dotenv_paths() -> list[Path]:
+    """.env files to load, highest priority first: the current working
+    directory, then the project directory."""
+    paths = [Path.cwd() / ".env", PROJECT_DIR / ".env"]
+    return list(dict.fromkeys(path.resolve() for path in paths))
+
+
+def load_dotenv(path: Path) -> None:
+    """Load KEY=VALUE lines (optionally prefixed with `export`) from a .env
+    file into os.environ, without overriding variables already set — by the
+    shell or by a higher-priority .env loaded earlier."""
     try:
-        lines = env_path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return
     for line in lines:
         line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-_load_dotenv()
-
-DEFAULT_HOST = os.environ.get("OPENSEARCH_HOST", "http://localhost:9200")
-DEFAULT_USER = os.environ.get("OPENSEARCH_USER")
-DEFAULT_PASSWORD = os.environ.get("OPENSEARCH_PASSWORD")
-DEFAULT_API_KEY = os.environ.get("OPENSEARCH_API_KEY")
-DEFAULT_BEARER_TOKEN = os.environ.get("OPENSEARCH_BEARER_TOKEN")
-DEFAULT_CA_CERT = os.environ.get("OPENSEARCH_CA_CERT")
-DEFAULT_INSECURE = os.environ.get("OPENSEARCH_INSECURE", "").strip().lower() in ("1", "true", "yes")
-_env_lang = os.environ.get("OPENSEARCH_LANG", "en")
-DEFAULT_LANG = _env_lang if _env_lang in ("en", "de") else "en"
+def env_defaults() -> dict:
+    """CLI defaults from OPENSEARCH_* environment variables, read at call
+    time (after .env loading) rather than at import time."""
+    env = os.environ
+    lang = env.get("OPENSEARCH_LANG", "en")
+    return {
+        "host": env.get("OPENSEARCH_HOST", "http://localhost:9200"),
+        "user": env.get("OPENSEARCH_USER") or None,
+        "password": env.get("OPENSEARCH_PASSWORD") or None,
+        "api_key": env.get("OPENSEARCH_API_KEY") or None,
+        "bearer_token": env.get("OPENSEARCH_BEARER_TOKEN") or None,
+        "ca_cert": env.get("OPENSEARCH_CA_CERT") or None,
+        "insecure": env.get("OPENSEARCH_INSECURE", "").strip().lower() in ("1", "true", "yes"),
+        "lang": lang if lang in ("en", "de") else "en",
+    }
 
 
 class AnalyzerCli:
@@ -55,14 +71,33 @@ class AnalyzerCli:
     cycles, plus argument parsing for the console entry point."""
 
     @staticmethod
-    def describe_request_error(lang: str, client: OpenSearchGetter, exc: HTTPError | URLError) -> str:
+    def error_reason(body: str) -> str:
+        """The "reason" from an OpenSearch JSON error body (which names e.g. the
+        missing permission on a 403), or the raw body if it isn't one."""
+        try:
+            error = json.loads(body).get("error")
+        except (ValueError, AttributeError):
+            error = None
+        if isinstance(error, dict) and error.get("reason"):
+            return str(error["reason"])
+        if isinstance(error, str):
+            return error
+        return body[:200]
+
+    @classmethod
+    def describe_request_error(cls, lang: str, client: OpenSearchGetter, exc: HTTPError | URLError) -> str:
         if isinstance(exc, HTTPError):
-            if exc.code in (401, 403):
-                return Translator.t(lang, "err_auth", code=exc.code, url=exc.url)
-            body = exc.read().decode(errors="replace")[:200]
-            return Translator.t(lang, "err_http", code=exc.code, url=exc.url, body=body)
+            if exc.code == 401:
+                key = "err_auth_rejected" if client.has_credentials else "err_auth_missing"
+                return Translator.t(lang, key, code=exc.code, url=exc.url)
+            body = exc.read().decode(errors="replace")
+            if exc.code == 403:
+                return Translator.t(lang, "err_forbidden", url=exc.url, reason=cls.error_reason(body))
+            return Translator.t(lang, "err_http", code=exc.code, url=exc.url, body=body[:200])
         if isinstance(exc.reason, ssl.SSLCertVerificationError):
             return Translator.t(lang, "err_tls", host=client.host, reason=exc.reason)
+        if isinstance(exc.reason, ValueError):
+            return Translator.t(lang, "err_invalid_response", host=client.host, reason=exc.reason)
         return Translator.t(lang, "err_unreachable", host=client.host, reason=exc.reason)
 
     @staticmethod
@@ -120,6 +155,7 @@ class AnalyzerCli:
                 "cluster": cluster,
                 "indices": indices,
                 "nodes": nodes,
+                "top_queries_type": query_type,
                 "top_queries": top_queries,
                 "disk_watermarks": watermarks,
                 "collection_errors": collection_errors,
@@ -127,15 +163,16 @@ class AnalyzerCli:
             }, indent=2))
         else:
             ReportPrinter.print_report(lang, client.host, cluster, indices, nodes, top_queries, query_limit,
-                                        watermarks, findings, collection_errors)
+                                        watermarks, findings, collection_errors, query_type)
 
         return EXIT_FINDINGS if findings else EXIT_OK
 
     @staticmethod
     def build_arg_parser(lang: str) -> argparse.ArgumentParser:
+        defaults = env_defaults()
         parser = argparse.ArgumentParser(description=Translator.t(lang, "prog_description"))
-        parser.add_argument("--host", default=DEFAULT_HOST,
-                             help=Translator.t(lang, "help_host", default=DEFAULT_HOST))
+        parser.add_argument("--host", default=defaults["host"],
+                             help=Translator.t(lang, "help_host", default=defaults["host"]))
         parser.add_argument("--json", action="store_true", help=Translator.t(lang, "help_json"))
         parser.add_argument("--lang", choices=["en", "de"], default=lang,
                              help=Translator.t(lang, "help_lang", default=lang))
@@ -145,20 +182,23 @@ class AnalyzerCli:
                              help=Translator.t(lang, "help_long_queries_type"))
         parser.add_argument("--long-queries-limit", type=int, default=10,
                              help=Translator.t(lang, "help_long_queries_limit"))
-        parser.add_argument("--user", "-u", default=DEFAULT_USER, help=Translator.t(lang, "help_user"))
-        parser.add_argument("--password", default=DEFAULT_PASSWORD, help=Translator.t(lang, "help_password"))
-        parser.add_argument("--api-key", default=DEFAULT_API_KEY, help=Translator.t(lang, "help_api_key"))
-        parser.add_argument("--bearer-token", default=DEFAULT_BEARER_TOKEN,
+        parser.add_argument("--user", "-u", default=defaults["user"], help=Translator.t(lang, "help_user"))
+        parser.add_argument("--password", default=defaults["password"], help=Translator.t(lang, "help_password"))
+        parser.add_argument("--api-key", default=defaults["api_key"], help=Translator.t(lang, "help_api_key"))
+        parser.add_argument("--bearer-token", default=defaults["bearer_token"],
                              help=Translator.t(lang, "help_bearer_token"))
-        parser.add_argument("--ca-cert", default=DEFAULT_CA_CERT, help=Translator.t(lang, "help_ca_cert"))
-        parser.add_argument("--insecure", "-k", action="store_true", default=DEFAULT_INSECURE,
+        parser.add_argument("--ca-cert", default=defaults["ca_cert"], help=Translator.t(lang, "help_ca_cert"))
+        parser.add_argument("--insecure", "-k", action="store_true", default=defaults["insecure"],
                              help=Translator.t(lang, "help_insecure"))
         return parser
 
     @classmethod
     def main(cls) -> int:
+        for path in dotenv_paths():
+            load_dotenv(path)
+
         lang_pre_parser = argparse.ArgumentParser(add_help=False)
-        lang_pre_parser.add_argument("--lang", choices=["en", "de"], default=DEFAULT_LANG)
+        lang_pre_parser.add_argument("--lang", choices=["en", "de"], default=env_defaults()["lang"])
         pre_args, _ = lang_pre_parser.parse_known_args()
 
         parser = cls.build_arg_parser(pre_args.lang)
