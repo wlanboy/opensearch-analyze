@@ -37,11 +37,15 @@ docker compose up -d
 ./adduser.sh   # legt den read-only Analyzer-User an und schreibt ihn nach .env
 ```
 
-`adduser.sh` legt eine minimal berechtigte Rolle (`cluster_monitor` +
+`adduser.sh` legt eine minimal berechtigte Rolle (`cluster_monitor`,
+`cluster:admin/opensearch/insights/top_queries` für die lang laufenden Abfragen,
 `indices_monitor`) und einen zugehörigen User (`opensearch-analyzer`) über die
 Security-REST-API an, generiert dafür ein zufälliges Passwort und schreibt
 `OPENSEARCH_HOST`/`OPENSEARCH_USER`/`OPENSEARCH_PASSWORD`/`OPENSEARCH_INSECURE`
-nach `.env`. Erneutes Ausführen rotiert das Passwort.
+nach `.env`. Erneutes Ausführen rotiert das Passwort und aktualisiert die
+Rolle — nötig nach neu angelegten Docker-Volumes (der User existiert dann
+nicht mehr, das Tool meldet HTTP 401) oder wenn das Tool eine fehlende
+Berechtigung (HTTP 403) meldet.
 
 | Service | URL |
 |---|---|
@@ -60,6 +64,13 @@ Analysiert Cluster-Health, Index-Stats (Search/Indexing/Store/Docs/Merge/Caches)
 Node-Health (Heap, Disk-Watermarks, Cache-Hit-Ratio, langsame Queries) über die OpenSearch-REST-API.
 Liest Host/User/Passwort automatisch aus `.env`, sofern vorhanden — für den lokalen
 Docker-Compose-Stack reicht nach `./adduser.sh` ein einfaches `./opensearch-analyze.py`.
+Gesucht wird zuerst `.env` im aktuellen Verzeichnis, danach im Projektverzeichnis
+(dort, wo `adduser.sh` sie anlegt); bereits gesetzte Umgebungsvariablen haben Vorrang.
+
+Such-, Cache- und Merge-Statistiken zählen alle Shard-Kopien (inkl. Replikas),
+Dokumente, Größe und Indexierungen nur die Primär-Shards. Disk-Watermarks
+werden als Prozent, Ratio (`0.85`) oder absolute Größe (`50gb`, = mindestens so
+viel freier Platz) ausgewertet.
 
 ```bash
 ./opensearch-analyze.py
@@ -90,6 +101,12 @@ Console-Script-Eintrag.
 | `--bearer-token` | Bearer-/JWT-Token, gesendet als `Authorization: Bearer ...` (Default: `.env`/`$OPENSEARCH_BEARER_TOKEN`); schließt `--user`/`--api-key` aus |
 | `--ca-cert` | Pfad zu einem CA-Bundle für ein selbstsigniertes TLS-Zertifikat (Default: `.env`/`$OPENSEARCH_CA_CERT`) |
 | `--insecure`, `-k` | TLS-Zertifikatsprüfung überspringen (Default: `.env`/`$OPENSEARCH_INSECURE`); nur für lokale/Dev-Setups |
+
+**JSON-Ausgabe**: Die Feldnamen sind stabil. `query_cache_hit_ratio`/
+`request_cache_hit_ratio` sind `null`, solange ein Cache keine Zugriffe hatte;
+`disk_watermarks` enthält je Stufe den Prozentwert (`low`, `high`,
+`flood_stage`) bzw. bei absoluter Konfiguration den Mindest-Freiplatz
+(`low_free_bytes` usw.); `top_queries_type` nennt die Sortiermetrik.
 
 **Exit-Codes** (für Cron/Monitoring-Integration): `0` = sauberer Bericht ohne
 Befunde, `1` = Cluster nicht erreichbar/Auth fehlgeschlagen (kein Bericht
