@@ -6,10 +6,36 @@ from .constants import (
     HEAP_WARN_PERCENT,
     SLOW_QUERY_WARN_MS,
 )
+from .formatting import Formatter
 from .i18n import Translator
+
+# Checked most severe first; only the first tier a node reaches is reported.
+_DISK_TIERS = (("flood_stage", "finding_disk_flood"), ("high", "finding_disk_high"), ("low", "finding_disk_low"))
 
 
 class FindingsBuilder:
+    @staticmethod
+    def format_watermark(lang: str, watermarks: dict, key: str) -> str | None:
+        """Display form of one watermark: "95%" or "min. 50.0GB free", None if unknown."""
+        percent = watermarks.get(key)
+        if percent is not None:
+            return f"{percent:.0f}%"
+        free_bytes = watermarks.get(f"{key}_free_bytes")
+        if free_bytes is not None:
+            return Translator.t(lang, "watermark_min_free", size=Formatter.format_bytes(free_bytes))
+        return None
+
+    @staticmethod
+    def watermark_reached(node: dict, watermarks: dict, key: str) -> bool:
+        percent = watermarks.get(key)
+        if percent is not None:
+            return node["disk_used_percent"] >= percent
+        free_bytes = watermarks.get(f"{key}_free_bytes")
+        if free_bytes is not None:
+            # A node without fs stats reports 0 total bytes; don't flag it.
+            return node["disk_total_bytes"] > 0 and node["disk_available_bytes"] <= free_bytes
+        return False
+
     @staticmethod
     def build(lang: str, cluster: dict, indices: list, nodes: list, top_queries: list | None = None,
               watermarks: dict | None = None) -> list:
@@ -26,15 +52,13 @@ class FindingsBuilder:
                 findings.append(
                     Translator.t(lang, "finding_indexing_failed", index=idx["index"], n=idx["indexing_failed"])
                 )
-            if idx["query_cache_samples"] >= CACHE_SAMPLE_MIN and idx["query_cache_hit_ratio"] < CACHE_HIT_RATIO_WARN:
+            qc_ratio = idx["query_cache_hit_ratio"]
+            if idx["query_cache_samples"] >= CACHE_SAMPLE_MIN and qc_ratio is not None \
+                    and qc_ratio < CACHE_HIT_RATIO_WARN:
                 findings.append(
                     Translator.t(lang, "finding_low_query_cache", index=idx["index"],
-                                 pct=f"{idx['query_cache_hit_ratio']:.1f}")
+                                 pct=f"{qc_ratio:.1f}")
                 )
-
-        flood_wm = watermarks.get("flood_stage")
-        high_wm = watermarks.get("high")
-        low_wm = watermarks.get("low")
 
         for node in nodes:
             if node["heap_used_percent"] >= HEAP_WARN_PERCENT:
@@ -49,27 +73,19 @@ class FindingsBuilder:
             if tripped > 0:
                 findings.append(Translator.t(lang, "finding_breaker_tripped", node=node["node"], n=tripped))
 
-            disk_pct = node["disk_used_percent"]
-            if flood_wm is not None and disk_pct >= flood_wm:
-                findings.append(
-                    Translator.t(lang, "finding_disk_flood", node=node["node"], pct=f"{disk_pct:.1f}",
-                                 wm=f"{flood_wm:.0f}")
-                )
-            elif high_wm is not None and disk_pct >= high_wm:
-                findings.append(
-                    Translator.t(lang, "finding_disk_high", node=node["node"], pct=f"{disk_pct:.1f}",
-                                 wm=f"{high_wm:.0f}")
-                )
-            elif low_wm is not None and disk_pct >= low_wm:
-                findings.append(
-                    Translator.t(lang, "finding_disk_low", node=node["node"], pct=f"{disk_pct:.1f}",
-                                 wm=f"{low_wm:.0f}")
-                )
+            for key, message_key in _DISK_TIERS:
+                if FindingsBuilder.watermark_reached(node, watermarks, key):
+                    findings.append(Translator.t(
+                        lang, message_key, node=node["node"], pct=f"{node['disk_used_percent']:.1f}",
+                        free=Formatter.format_bytes(node["disk_available_bytes"]),
+                        wm=FindingsBuilder.format_watermark(lang, watermarks, key),
+                    ))
+                    break
 
         if top_queries:
             slow = [q for q in top_queries if q["latency_ms"] >= SLOW_QUERY_WARN_MS]
             if slow:
-                worst = slow[0]
+                worst = max(slow, key=lambda q: q["latency_ms"])
                 findings.append(Translator.t(
                     lang, "finding_slow_queries",
                     count=len(slow), word=Translator.slow_query_word(lang, len(slow)),

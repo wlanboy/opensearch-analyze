@@ -2,6 +2,7 @@
 and shapes it into plain dicts/lists for findings and rendering."""
 
 import json
+import re
 from urllib.error import HTTPError
 
 from .client import OpenSearchGetter
@@ -10,6 +11,16 @@ from .constants import (
     DISK_WATERMARK_DEFAULT_HIGH,
     DISK_WATERMARK_DEFAULT_LOW,
 )
+
+# ByteSizeValue units accepted by OpenSearch settings (case-insensitive).
+_BYTE_UNITS = {
+    "b": 1, "k": 1024, "kb": 1024, "m": 1024 ** 2, "mb": 1024 ** 2, "g": 1024 ** 3, "gb": 1024 ** 3,
+    "t": 1024 ** 4, "tb": 1024 ** 4, "p": 1024 ** 5, "pb": 1024 ** 5,
+}
+_BYTE_SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([a-z]+)$")
+
+# Which measurement each --long-queries-type ranks by.
+TOP_QUERY_SORT_KEYS = {"latency": "latency_ms", "cpu": "cpu_ns", "memory": "memory_bytes"}
 
 
 class OpenSearchCollector:
@@ -38,14 +49,18 @@ class OpenSearchCollector:
             if index_name.startswith("."):
                 continue
 
+            # Docs/size/indexing count each document once, so they come from
+            # primaries. Searches, caches and merges also run on replica
+            # copies, so primaries alone would undercount them.
             primaries = entry.get("primaries", {})
-            search = primaries.get("search", {})
+            total = entry.get("total", {})
+            search = total.get("search", {})
             indexing = primaries.get("indexing", {})
             docs = primaries.get("docs", {})
             store = primaries.get("store", {})
-            merges = primaries.get("merges", {})
-            query_cache = primaries.get("query_cache", {})
-            request_cache = primaries.get("request_cache", {})
+            merges = total.get("merges", {})
+            query_cache = total.get("query_cache", {})
+            request_cache = total.get("request_cache", {})
 
             query_total = search.get("query_total", 0)
             query_time_ms = search.get("query_time_in_millis", 0)
@@ -58,8 +73,9 @@ class OpenSearchCollector:
             rc_miss = request_cache.get("miss_count", 0)
 
             avg_query_ms = query_time_ms / query_total if query_total else 0.0
-            qc_ratio = qc_hit * 100.0 / (qc_hit + qc_miss) if (qc_hit + qc_miss) else 0.0
-            rc_ratio = rc_hit * 100.0 / (rc_hit + rc_miss) if (rc_hit + rc_miss) else 0.0
+            # None (not 0.0) without samples: "never used" is not "always missed".
+            qc_ratio = qc_hit * 100.0 / (qc_hit + qc_miss) if (qc_hit + qc_miss) else None
+            rc_ratio = rc_hit * 100.0 / (rc_hit + rc_miss) if (rc_hit + rc_miss) else None
 
             rows.append({
                 "index": index_name,
@@ -117,29 +133,44 @@ class OpenSearchCollector:
         return sorted(rows, key=lambda r: r["node"])
 
     @staticmethod
-    def parse_watermark_percent(value: object) -> float | None:
-        """Parse a disk watermark setting into a percent-used threshold, or
-        None if it's configured as an absolute size (e.g. "50gb") rather than
-        a percentage — an absolute-size watermark can't be safely compared
-        against a hardcoded percent default, so it's deliberately left
-        unresolved rather than substituted."""
+    def parse_watermark(value: object) -> tuple[float | None, int | None]:
+        """Parse a disk watermark setting into (percent_used, min_free_bytes);
+        exactly one is set for a valid value, both are None otherwise.
+
+        OpenSearch accepts a percentage ("85%"), a ratio ("0.85") or an
+        absolute size ("50gb"). An absolute size means "at least this much
+        disk must stay free", so it is compared against free bytes, not used
+        percent."""
         if value is None:
-            return None
-        text = str(value).strip()
-        if not text.endswith("%"):
-            return None
+            return None, None
+        text = str(value).strip().lower()
+        if text.endswith("%"):
+            try:
+                return float(text[:-1]), None
+            except ValueError:
+                return None, None
         try:
-            return float(text[:-1])
+            ratio = float(text)
         except ValueError:
-            return None
+            pass
+        else:
+            return (ratio * 100.0, None) if 0.0 <= ratio <= 1.0 else (None, None)
+        match = _BYTE_SIZE_RE.match(text)
+        if match and match.group(2) in _BYTE_UNITS:
+            return None, int(float(match.group(1)) * _BYTE_UNITS[match.group(2)])
+        return None, None
 
     def disk_watermarks(self) -> dict:
         """Effective disk allocation watermarks (persistent/transient override defaults).
 
-        Falls back to OpenSearch's documented defaults only when a tier
-        genuinely has no value for a key at all (e.g. an older cluster whose
-        include_defaults response omits it); a tier that does have a value,
-        just not a percentage one, is left as None rather than papered over.
+        For each of low/high/flood_stage the result holds the percent-used
+        threshold under the key itself and the absolute minimum free space
+        under "<key>_free_bytes"; one of the two is None depending on how the
+        watermark is configured.
+
+        Falls back to OpenSearch's documented percent defaults only when a
+        tier genuinely has no value for a key at all (e.g. an older cluster
+        whose include_defaults response omits it).
         """
         data = self.client.get("/_cluster/settings?include_defaults=true")
 
@@ -160,25 +191,30 @@ class OpenSearchCollector:
             "flood_stage": DISK_WATERMARK_DEFAULT_FLOOD,
         }
 
-        result = {}
+        result: dict[str, float | int | None] = {}
         for key in ("low", "high", "flood_stage"):
             raw = pick(key)
-            result[key] = fallback_percent[key] if raw is None else self.parse_watermark_percent(raw)
+            percent, free_bytes = (fallback_percent[key], None) if raw is None else self.parse_watermark(raw)
+            result[key] = percent
+            result[f"{key}_free_bytes"] = free_bytes
         return result
 
     def top_queries(self, query_type: str = "latency", limit: int = 10) -> list | None:
         """Long-running / expensive queries via the Query Insights plugin.
 
-        Returns None if the plugin isn't installed/enabled on the target
-        cluster (the endpoint 404s or is rejected), so the report can degrade
-        gracefully. Any other error (5xx, network) propagates so the caller
-        can distinguish "plugin not present" from "something actually went
-        wrong".
+        Returns None if the plugin isn't installed (404) or top-N collection
+        for this metric isn't enabled (400), so the report can degrade
+        gracefully. Any other error propagates, notably 403: the plugin is
+        there but the user lacks cluster:admin/opensearch/insights/top_queries,
+        which is a misconfiguration worth reporting, not a missing plugin.
+
+        Rows are ranked by the requested metric, matching what the plugin
+        itself ranked by.
         """
         try:
             data = self.client.get(f"/_insights/top_queries?type={query_type}&verbose=true")
         except HTTPError as exc:
-            if exc.code in (400, 403, 404):
+            if exc.code in (400, 404):
                 return None
             raise
 
@@ -201,5 +237,6 @@ class OpenSearchCollector:
                 "query": query_summary,
             })
 
-        rows.sort(key=lambda r: r["latency_ms"], reverse=True)
+        sort_key = TOP_QUERY_SORT_KEYS[query_type]
+        rows.sort(key=lambda r: r[sort_key], reverse=True)
         return rows[:limit]
