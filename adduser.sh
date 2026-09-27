@@ -34,8 +34,9 @@ Legt (oder rotiert) den read-only OpenSearch-User an, den opensearch-analyze.py
 per Basic-Auth nutzt, und schreibt Host/User/Passwort nach $ENV_FILE.
 
 Legt dafür auch eine eigene, minimal berechtigte Rolle an (cluster_monitor +
-indices_monitor auf allen Indizes) — das eingebaute readall_and_monitor
-deckt _stats (indices:monitor/stats) nicht ab und reicht daher nicht aus.
+Lesezugriff auf Query-Insights-Top-Queries + indices_monitor auf allen
+Indizes) — das eingebaute readall_and_monitor deckt _stats
+(indices:monitor/stats) nicht ab und reicht daher nicht aus.
 
 Optionen:
   --host URL             OpenSearch-Basis-URL (Default: \$OPENSEARCH_HOST oder $HOST)
@@ -138,7 +139,7 @@ fi
 
 echo "Lege/aktualisiere Rolle '$ANALYZER_ROLE' an ..."
 ROLE_BODY='{
-  "cluster_permissions": ["cluster_monitor"],
+  "cluster_permissions": ["cluster_monitor", "cluster:admin/opensearch/insights/top_queries"],
   "index_permissions": [
     {"index_patterns": ["*"], "allowed_actions": ["indices_monitor"]}
   ]
