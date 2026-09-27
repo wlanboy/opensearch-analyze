@@ -9,6 +9,9 @@ SECTION_LABELS = {
     "nodes": {"en": "nodes", "de": "Knoten"},
     "disk_watermarks": {"en": "disk watermarks", "de": "Disk-Watermarks"},
     "top_queries": {"en": "long-running queries", "de": "lang laufende Abfragen"},
+    "shards": {"en": "shards", "de": "Shards"},
+    "blocks": {"en": "index blocks", "de": "Index-Blocks"},
+    "allocation_explain": {"en": "allocation explanation", "de": "Allokations-Erklärung"},
 }
 
 STRINGS = {
@@ -97,8 +100,9 @@ STRINGS = {
     },
     "title_cluster": {"en": "Cluster", "de": "Cluster"},
     "headers_cluster": {
-        "en": ["status", "nodes", "active_shards", "relocating", "initializing", "unassigned"],
-        "de": ["status", "knoten", "aktive_shards", "verlagernd", "initialisierend", "nicht_zugewiesen"],
+        "en": ["status", "nodes", "active_shards", "relocating", "initializing", "unassigned", "pending_tasks"],
+        "de": ["status", "knoten", "aktive_shards", "verlagernd", "initialisierend", "nicht_zugewiesen",
+               "wartende_tasks"],
     },
     "title_indices": {"en": "Indices", "de": "Indizes"},
     "section_indices": {"en": "Indices ({n})", "de": "Indizes ({n})"},
@@ -110,9 +114,10 @@ STRINGS = {
     "title_nodes": {"en": "Nodes", "de": "Knoten"},
     "section_nodes": {"en": "Nodes ({n})", "de": "Knoten ({n})"},
     "headers_nodes": {
-        "en": ["node", "search_q", "search_rej", "search_active", "heap%", "disk%", "breaker_trips"],
-        "de": ["knoten", "suche_warteschlange", "suche_abgelehnt", "suche_aktiv", "heap%", "disk%",
-               "breaker_ausloesungen"],
+        "en": ["node", "shards", "search_q", "search_rej", "search_active", "write_q", "write_rej", "cpu%",
+               "heap%", "disk%", "fd%", "breaker_trips"],
+        "de": ["knoten", "shards", "suche_warteschlange", "suche_abgelehnt", "suche_aktiv", "schreib_warteschlange",
+               "schreib_abgelehnt", "cpu%", "heap%", "disk%", "fd%", "breaker_ausloesungen"],
     },
     "title_long_queries": {"en": "Long-running queries", "de": "Lang laufende Abfragen"},
     "section_long_queries": {
@@ -143,6 +148,41 @@ STRINGS = {
         "en": "{n} unassigned shard(s)",
         "de": "{n} nicht zugewiesene(r) Shard(s)",
     },
+    "finding_unassigned_shards_reasons": {
+        "en": "{n} unassigned shard(s) (reasons: {reasons})",
+        "de": "{n} nicht zugewiesene(r) Shard(s) (Gründe: {reasons})",
+    },
+    "shard_primary": {"en": "primary", "de": "Primär"},
+    "shard_replica": {"en": "replica", "de": "Replika"},
+    "finding_allocation_explain": {
+        "en": "shard [{index}][{shard}] ({copy}) unassigned: {explanation}",
+        "de": "Shard [{index}][{shard}] ({copy}) nicht zugewiesen: {explanation}",
+    },
+    "finding_pending_tasks": {
+        "en": "{n} pending cluster task(s), oldest waiting {wait} — the cluster manager is falling behind",
+        "de": "{n} wartende Cluster-Task(s), älteste wartet seit {wait} — der Cluster-Manager kommt nicht "
+              "hinterher",
+    },
+    "finding_block_cluster": {
+        "en": "cluster-wide block: {description} (blocks: {levels})",
+        "de": "clusterweiter Block: {description} (blockiert: {levels})",
+    },
+    "finding_block_index": {
+        "en": "index '{index}': {description} (blocks: {levels})",
+        "de": "Index '{index}': {description} (blockiert: {levels})",
+    },
+    "finding_shard_limit": {
+        "en": "{total} shards in the cluster, {pct}% of the limit {limit} (cluster.max_shards_per_node "
+              "{per_node} × {nodes} data node(s)) — creating indices fails once it is reached",
+        "de": "{total} Shards im Cluster, {pct}% des Limits {limit} (cluster.max_shards_per_node {per_node} × "
+              "{nodes} Daten-Node(s)) — ist es erreicht, schlägt das Anlegen von Indizes fehl",
+    },
+    "finding_large_shards": {
+        "en": "index '{index}': {n} primary shard(s) >= {limit} (largest {largest}) — slows recovery and "
+              "relocation, consider more primary shards or rollover",
+        "de": "Index '{index}': {n} Primär-Shard(s) >= {limit} (größter {largest}) — verlangsamt Recovery "
+              "und Verlagerung, mehr Primär-Shards oder Rollover erwägen",
+    },
     "finding_indexing_failed": {
         "en": "index '{index}': {n} failed indexing operation(s)",
         "de": "Index '{index}': {n} fehlgeschlagene Indexierungsoperation(en)",
@@ -158,6 +198,18 @@ STRINGS = {
     "finding_search_rejected": {
         "en": "node '{node}': {n} rejected search task(s)",
         "de": "Node '{node}': {n} abgelehnte(r) Such-Task(s)",
+    },
+    "finding_write_rejected": {
+        "en": "node '{node}': {n} rejected write task(s) — indexing requests were dropped",
+        "de": "Node '{node}': {n} abgelehnte(r) Schreib-Task(s) — Indexierungs-Requests wurden verworfen",
+    },
+    "finding_cpu": {
+        "en": "node '{node}': CPU at {pct}%",
+        "de": "Node '{node}': CPU bei {pct}%",
+    },
+    "finding_file_descriptors": {
+        "en": "node '{node}': {pct}% of file descriptors in use ({open}/{max})",
+        "de": "Node '{node}': {pct}% der File-Deskriptoren belegt ({open}/{max})",
     },
     "finding_breaker_tripped": {
         "en": "node '{node}': circuit breaker tripped {n} time(s)",

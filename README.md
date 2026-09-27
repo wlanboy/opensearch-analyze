@@ -62,6 +62,22 @@ verwenden.
 
 Analysiert Cluster-Health, Index-Stats (Search/Indexing/Store/Docs/Merge/Caches) und
 Node-Health (Heap, Disk-Watermarks, Cache-Hit-Ratio, langsame Queries) über die OpenSearch-REST-API.
+
+Geprüft wird unter anderem:
+
+| Bereich | Befund ab |
+|---|---|
+| Cluster | Status yellow/red, nicht zugewiesene Shards (mit Grund und Erklärung aus `_cluster/allocation/explain`), ≥ 10 wartende Cluster-Tasks oder ≥ 30 s Wartezeit |
+| Shards | ≥ 80 % von `cluster.max_shards_per_node` × Daten-Nodes, Primär-Shards ≥ 50 GB |
+| Blocks | jeder clusterweite oder Index-Block (z. B. Read-Only nach Flood-Stage), außer geschlossenen Indizes |
+| Nodes | Heap ≥ 85 %, CPU ≥ 90 %, File-Deskriptoren ≥ 80 %, abgelehnte Such- oder Schreib-Tasks, ausgelöste Circuit Breaker, Disk-Watermarks |
+| Indizes | fehlgeschlagene Indexierungen, Query-Cache-Trefferquote < 50 % |
+| Abfragen | lang laufende Abfragen ≥ 1 s (Query Insights) |
+
+Abgelehnte Tasks, Breaker und fehlgeschlagene Indexierungen sind Zähler seit
+Node-Start. Versteckte Indizes (`.…`) und die Export-Indizes von Query Insights
+(`top_queries-…`) erscheinen nicht in der Index-Tabelle, zählen aber für das
+Shard-Limit mit.
 Liest Host/User/Passwort automatisch aus `.env`, sofern vorhanden — für den lokalen
 Docker-Compose-Stack reicht nach `./adduser.sh` ein einfaches `./opensearch-analyze.py`.
 Gesucht wird zuerst `.env` im aktuellen Verzeichnis, danach im Projektverzeichnis
@@ -106,7 +122,10 @@ Console-Script-Eintrag.
 `request_cache_hit_ratio` sind `null`, solange ein Cache keine Zugriffe hatte;
 `disk_watermarks` enthält je Stufe den Prozentwert (`low`, `high`,
 `flood_stage`) bzw. bei absoluter Konfiguration den Mindest-Freiplatz
-(`low_free_bytes` usw.); `top_queries_type` nennt die Sortiermetrik.
+(`low_free_bytes` usw.); `top_queries_type` nennt die Sortiermetrik;
+`shards`, `blocks` und `allocation_explain` enthalten die Shard-Verteilung, aktive
+Blocks und die Allokations-Erklärung (`null`, wenn keine Shards unzugewiesen sind).
+Node-Zeilen enthalten zusätzlich die GC-Zähler der Old Generation.
 
 **Exit-Codes** (für Cron/Monitoring-Integration): `0` = sauberer Bericht ohne
 Befunde, `1` = Cluster nicht erreichbar/Auth fehlgeschlagen (kein Bericht

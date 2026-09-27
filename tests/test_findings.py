@@ -18,7 +18,9 @@ def _index_row(**overrides):
 
 def _node_row(**overrides):
     row = {
-        "node": "node-a", "heap_used_percent": 10, "search_rejected": 0,
+        "node": "node-a", "heap_used_percent": 10, "search_rejected": 0, "write_rejected": 0,
+        "cpu_percent": 5, "file_descriptors_used_percent": 1.0, "open_file_descriptors": 650,
+        "max_file_descriptors": 65536,
         "breaker_parent_tripped": 0, "breaker_fielddata_tripped": 0, "breaker_request_tripped": 0,
         "disk_used_percent": 10.0, "disk_available_bytes": 900 * 1024 ** 3,
         "disk_total_bytes": 1000 * 1024 ** 3,
@@ -137,3 +139,86 @@ def test_slow_queries_worst_is_max_latency_regardless_of_order():
     rows = [{"latency_ms": 1500, "indices": "logs"}, {"latency_ms": 3000, "indices": "metrics"}]
     findings = FindingsBuilder.build("en", _cluster(), [], [], top_queries=rows)
     assert "2 long-running queries >= 1000ms (worst: 3000ms on metrics)" in findings
+
+
+def test_write_rejected_cpu_and_file_descriptors():
+    findings = FindingsBuilder.build("en", _cluster(), [], [
+        _node_row(write_rejected=4, cpu_percent=95, file_descriptors_used_percent=85.0,
+                  open_file_descriptors=850, max_file_descriptors=1000),
+    ])
+    assert "node 'node-a': 4 rejected write task(s) — indexing requests were dropped" in findings
+    assert "node 'node-a': CPU at 95%" in findings
+    assert "node 'node-a': 85% of file descriptors in use (850/1000)" in findings
+
+
+def test_unknown_file_descriptor_limit_is_not_a_finding():
+    findings = FindingsBuilder.build("en", _cluster(), [], [_node_row(file_descriptors_used_percent=None)])
+    assert findings == []
+
+
+def test_unassigned_shards_with_reasons_and_allocation_explanation():
+    shards = {"total": 3, "per_node": {}, "unassigned_reasons": {"NODE_LEFT": 2, "INDEX_CREATED": 1},
+              "large_primaries": [], "max_shards_per_node": None}
+    allocation = {"index": "logs", "shard": 0, "primary": False, "reason": "NODE_LEFT",
+                  "explanation": "cannot allocate because allocation is not permitted to any of the nodes",
+                  "decider_explanation": "same_shard: a copy of this shard is already allocated to this node"}
+    findings = FindingsBuilder.build("en", _cluster(unassigned=3), [], [], shards=shards, allocation=allocation)
+    assert "3 unassigned shard(s) (reasons: NODE_LEFT ×2, INDEX_CREATED ×1)" in findings
+    assert ("shard [logs][0] (replica) unassigned: cannot allocate because allocation is not permitted to any "
+            "of the nodes — same_shard: a copy of this shard is already allocated to this node") in findings
+
+
+@pytest.mark.parametrize("pending,wait_ms,expected", [
+    (0, 0, False),
+    (9, 29_999, False),
+    (10, 0, True),
+    (1, 30_000, True),
+])
+def test_pending_tasks(pending, wait_ms, expected):
+    cluster = {**_cluster(), "pending_tasks": pending, "pending_task_max_wait_ms": wait_ms}
+    findings = FindingsBuilder.build("en", cluster, [], [])
+    assert any("pending cluster task" in f for f in findings) is expected
+
+
+def test_blocks_index_and_cluster_wide():
+    blocks = [
+        {"index": None, "id": "5", "description": "cluster read-only (api)", "levels": ["write", "metadata_write"]},
+        {"index": "logs", "id": "12",
+         "description": "disk usage exceeded flood-stage watermark, index has read-only-allow-delete block",
+         "levels": ["write", "metadata_write"]},
+    ]
+    findings = FindingsBuilder.build("en", _cluster(), [], [], blocks=blocks)
+    assert "cluster-wide block: cluster read-only (api) (blocks: write, metadata_write)" in findings
+    assert ("index 'logs': disk usage exceeded flood-stage watermark, index has read-only-allow-delete block "
+            "(blocks: write, metadata_write)") in findings
+
+
+def _shards(total, max_per_node: int | None = 1000, large=()):
+    return {"total": total, "per_node": {}, "unassigned_reasons": {}, "large_primaries": list(large),
+            "max_shards_per_node": max_per_node}
+
+
+@pytest.mark.parametrize("total,expected", [(1599, False), (1600, True)])
+def test_shard_limit_warns_at_80_percent_of_cluster_limit(total, expected):
+    cluster = {**_cluster(), "number_of_data_nodes": 2}
+    findings = FindingsBuilder.build("en", cluster, [], [], shards=_shards(total))
+    assert any("of the limit 2000" in f for f in findings) is expected
+
+
+def test_shard_limit_skipped_when_limit_unknown():
+    cluster = {**_cluster(), "number_of_data_nodes": 2}
+    assert FindingsBuilder.build("en", cluster, [], [], shards=_shards(5000, max_per_node=None)) == []
+
+
+def test_large_shards_grouped_per_index():
+    gb = 1024 ** 3
+    large = [
+        {"index": "logs", "shard": 0, "node": "n1", "store_bytes": 80 * gb},
+        {"index": "logs", "shard": 1, "node": "n2", "store_bytes": 60 * gb},
+        {"index": "metrics", "shard": 0, "node": "n1", "store_bytes": 55 * gb},
+    ]
+    findings = FindingsBuilder.build("en", _cluster(), [], [], shards=_shards(10, large=large))
+    assert [f.split(" — ")[0] for f in findings] == [
+        "index 'logs': 2 primary shard(s) >= 50.0GB (largest 80.0GB)",
+        "index 'metrics': 1 primary shard(s) >= 50.0GB (largest 55.0GB)",
+    ]

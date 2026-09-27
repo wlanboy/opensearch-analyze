@@ -28,6 +28,7 @@ def test_index_stats_skips_dot_indices_and_computes_ratios():
         "/_stats/search,indexing,store,docs,merge,query_cache,request_cache": {
             "indices": {
                 ".kibana": {"primaries": {}},
+                "top_queries-2026.09.27-04126": {"primaries": {}},
                 "logs": {
                     "primaries": {
                         "search": {"query_total": 2, "query_time_in_millis": 60},
@@ -83,12 +84,16 @@ def test_index_stats_cache_ratio_is_none_without_samples():
 
 def test_node_stats_computes_disk_percent_and_sorts_by_name():
     client = FakeClient({
-        "/_nodes/stats/thread_pool,jvm,breaker,fs": {
+        "/_nodes/stats/thread_pool,jvm,breaker,fs,process,os": {
             "nodes": {
                 "id2": {
                     "name": "node-b",
-                    "thread_pool": {"search": {"queue": 0, "rejected": 0, "active": 1}},
-                    "jvm": {"mem": {"heap_used_percent": 50}},
+                    "thread_pool": {"search": {"queue": 0, "rejected": 0, "active": 1},
+                                    "write": {"queue": 3, "rejected": 7}},
+                    "jvm": {"mem": {"heap_used_percent": 50},
+                            "gc": {"collectors": {"old": {"collection_count": 2, "collection_time_in_millis": 40}}}},
+                    "process": {"open_file_descriptors": 500, "max_file_descriptors": 1000},
+                    "os": {"cpu": {"percent": 42}},
                     "breakers": {},
                     "fs": {"total": {"total_in_bytes": 1000, "available_in_bytes": 400}},
                 },
@@ -106,6 +111,13 @@ def test_node_stats_computes_disk_percent_and_sorts_by_name():
     assert [r["node"] for r in rows] == ["node-a", "node-b"]
     assert rows[1]["disk_used_percent"] == 60.0
     assert rows[0]["disk_used_percent"] == 0.0
+    assert rows[1]["write_queue"] == 3
+    assert rows[1]["write_rejected"] == 7
+    assert rows[1]["cpu_percent"] == 42
+    assert rows[1]["file_descriptors_used_percent"] == 50.0
+    assert rows[1]["gc_old_collection_count"] == 2
+    # node-a reports no process stats: percentage unknown, not 0.
+    assert rows[0]["file_descriptors_used_percent"] is None
 
 
 @pytest.mark.parametrize("value,expected", [
@@ -241,3 +253,107 @@ def test_top_queries_ranks_by_requested_metric(query_type, expected_ids):
     rows = OpenSearchCollector(client).top_queries(query_type, limit=2)
     assert rows is not None
     assert [r["id"] for r in rows] == expected_ids
+
+
+def test_cluster_health_includes_pending_tasks_and_data_nodes():
+    client = FakeClient({"/_cluster/health": {
+        "status": "green", "number_of_data_nodes": 2, "number_of_pending_tasks": 3,
+        "task_max_waiting_in_queue_millis": 1500,
+    }})
+    result = OpenSearchCollector(client).cluster_health()
+    assert result["number_of_data_nodes"] == 2
+    assert result["pending_tasks"] == 3
+    assert result["pending_task_max_wait_ms"] == 1500
+
+
+SHARDS_PATH = "/_cat/shards?format=json&bytes=b&h=index,shard,prirep,state,store,node,unassigned.reason"
+SETTINGS_PATH = "/_cluster/settings?include_defaults=true"
+
+
+def test_shard_summary():
+    gb = 1024 ** 3
+    client = FakeClient({
+        SHARDS_PATH: [
+            {"index": "big", "shard": "0", "prirep": "p", "state": "STARTED", "store": str(60 * gb), "node": "n2"},
+            {"index": "big", "shard": "0", "prirep": "r", "state": "STARTED", "store": str(60 * gb), "node": "n1"},
+            {"index": ".hidden", "shard": "0", "prirep": "p", "state": "STARTED", "store": "208", "node": "n1"},
+            {"index": "logs", "shard": "0", "prirep": "r", "state": "UNASSIGNED", "store": None, "node": None,
+             "unassigned.reason": "NODE_LEFT"},
+            {"index": "logs", "shard": "1", "prirep": "r", "state": "UNASSIGNED", "store": None, "node": None,
+             "unassigned.reason": "NODE_LEFT"},
+            {"index": "new", "shard": "0", "prirep": "p", "state": "UNASSIGNED", "store": None, "node": None,
+             "unassigned.reason": "INDEX_CREATED"},
+        ],
+        SETTINGS_PATH: {"persistent": {"cluster": {"max_shards_per_node": "500"}},
+                        "defaults": {"cluster": {"max_shards_per_node": "1000"}}},
+    })
+    result = OpenSearchCollector(client).shard_summary()
+    assert result["total"] == 6
+    assert result["per_node"] == {"n1": 2, "n2": 1}
+    assert result["unassigned_reasons"] == {"NODE_LEFT": 2, "INDEX_CREATED": 1}
+    # Only the primary counts; the replica copy would list the same data twice.
+    assert result["large_primaries"] == [{"index": "big", "shard": 0, "node": "n2", "store_bytes": 60 * gb}]
+    assert result["max_shards_per_node"] == 500
+
+
+def test_max_shards_per_node_none_when_settings_fail():
+    client = FakeClient({SETTINGS_PATH: make_http_error(403)})
+    assert OpenSearchCollector(client).max_shards_per_node() is None
+
+
+def test_cluster_settings_fetched_once_per_collector():
+    calls = []
+
+    class CountingClient(FakeClient):
+        def get(self, path):
+            calls.append(path)
+            return super().get(path)
+
+    client = CountingClient({SETTINGS_PATH: {"defaults": {"cluster": {"max_shards_per_node": "1000"}}}})
+    collector = OpenSearchCollector(client)
+    collector.disk_watermarks()
+    collector.max_shards_per_node()
+    assert calls == [SETTINGS_PATH]
+
+
+def test_blocks_lists_global_and_index_blocks_but_not_closed_indices():
+    client = FakeClient({"/_cluster/state/blocks": {"blocks": {
+        "global": {"5": {"description": "cluster read-only (api)", "levels": ["write", "metadata_write"]}},
+        "indices": {
+            "logs": {"12": {"description": "flood-stage", "levels": ["write", "metadata_write"]}},
+            "archived": {"4": {"description": "index closed", "levels": ["read", "write"]}},
+        },
+    }}})
+    assert OpenSearchCollector(client).blocks() == [
+        {"index": None, "id": "5", "description": "cluster read-only (api)", "levels": ["write", "metadata_write"]},
+        {"index": "logs", "id": "12", "description": "flood-stage", "levels": ["write", "metadata_write"]},
+    ]
+
+
+def test_blocks_empty():
+    client = FakeClient({"/_cluster/state/blocks": {"cluster_name": "c", "blocks": {}}})
+    assert OpenSearchCollector(client).blocks() == []
+
+
+def test_allocation_explain_picks_first_no_decider():
+    client = FakeClient({"/_cluster/allocation/explain": {
+        "index": "logs", "shard": 0, "primary": False,
+        "unassigned_info": {"reason": "INDEX_CREATED"},
+        "allocate_explanation": "cannot allocate because allocation is not permitted to any of the nodes",
+        "node_allocation_decisions": [
+            {"node_name": "n1", "deciders": [
+                {"decider": "filter", "decision": "YES", "explanation": "ok"},
+                {"decider": "same_shard", "decision": "NO", "explanation": "a copy is already here"},
+            ]},
+        ],
+    }})
+    assert OpenSearchCollector(client).allocation_explain() == {
+        "index": "logs", "shard": 0, "primary": False, "reason": "INDEX_CREATED",
+        "explanation": "cannot allocate because allocation is not permitted to any of the nodes",
+        "decider_explanation": "same_shard: a copy is already here",
+    }
+
+
+def test_allocation_explain_none_when_nothing_unassigned():
+    client = FakeClient({"/_cluster/allocation/explain": make_http_error(400)})
+    assert OpenSearchCollector(client).allocation_explain() is None

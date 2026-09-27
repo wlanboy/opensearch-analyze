@@ -15,6 +15,10 @@ class ReportPrinter:
         return "-" if ratio is None else f"{ratio:.1f}"
 
     @staticmethod
+    def format_fd_percent(pct: float | None) -> str:
+        return "-" if pct is None else f"{pct:.0f}"
+
+    @staticmethod
     def print_table(lang: str, headers: list, rows: list, wrap_widths: dict | None = None) -> None:
         """Print an aligned table. wrap_widths maps column index -> max width;
         cells in that column wrap onto continuation lines instead of being cut off."""
@@ -50,7 +54,8 @@ class ReportPrinter:
     @classmethod
     def print_report(cls, lang: str, host: str, cluster: dict, indices: list | None, nodes: list | None,
                       top_queries, query_limit: int, watermarks: dict | None, findings: list,
-                      collection_errors: dict | None = None, query_type: str = "latency") -> None:
+                      collection_errors: dict | None = None, query_type: str = "latency",
+                      shards: dict | None = None) -> None:
         collection_errors = collection_errors or {}
         watermarks = watermarks or {}
         ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
@@ -70,7 +75,7 @@ class ReportPrinter:
             [[
                 cluster.get("status"), cluster.get("number_of_nodes"), cluster.get("active_shards"),
                 cluster.get("relocating_shards"), cluster.get("initializing_shards"),
-                cluster.get("unassigned_shards"),
+                cluster.get("unassigned_shards"), cluster.get("pending_tasks"),
             ]],
         )
 
@@ -89,6 +94,7 @@ class ReportPrinter:
                 ] for i in indices],
             )
 
+        shards_per_node = (shards or {}).get("per_node", {})
         if nodes is None:
             print(f"\n{Translator.t(lang, 'title_nodes')}")
             print(f"  {collection_errors.get('nodes', '')}")
@@ -98,8 +104,10 @@ class ReportPrinter:
                 lang,
                 Translator.headers(lang, "headers_nodes"),
                 [[
-                    n["node"], n["search_queue"], n["search_rejected"], n["search_active"], n["heap_used_percent"],
-                    f"{n['disk_used_percent']:.1f}",
+                    n["node"], shards_per_node.get(n["node"], "-"), n["search_queue"], n["search_rejected"],
+                    n["search_active"], n["write_queue"], n["write_rejected"], n["cpu_percent"],
+                    n["heap_used_percent"], f"{n['disk_used_percent']:.1f}",
+                    cls.format_fd_percent(n["file_descriptors_used_percent"]),
                     n["breaker_parent_tripped"] + n["breaker_fielddata_tripped"] + n["breaker_request_tripped"],
                 ] for n in nodes],
             )

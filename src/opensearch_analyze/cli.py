@@ -136,13 +136,28 @@ class AnalyzerCli:
             collection_errors["disk_watermarks"] = cls.describe_request_error(lang, client, exc)
         watermarks = watermarks or {}
 
+        shards, exc = cls._collect_optional(collector.shard_summary)
+        if exc is not None:
+            collection_errors["shards"] = cls.describe_request_error(lang, client, exc)
+
+        blocks, exc = cls._collect_optional(collector.blocks)
+        if exc is not None:
+            collection_errors["blocks"] = cls.describe_request_error(lang, client, exc)
+
+        allocation = None
+        if (cluster.get("unassigned_shards") or 0) > 0:
+            allocation, exc = cls._collect_optional(collector.allocation_explain)
+            if exc is not None:
+                collection_errors["allocation_explain"] = cls.describe_request_error(lang, client, exc)
+
         top_queries = None
         if query_limit > 0:
             top_queries, exc = cls._collect_optional(collector.top_queries, query_type, query_limit)
             if exc is not None:
                 collection_errors["top_queries"] = cls.describe_request_error(lang, client, exc)
 
-        findings = FindingsBuilder.build(lang, cluster, indices or [], nodes or [], top_queries, watermarks)
+        findings = FindingsBuilder.build(lang, cluster, indices or [], nodes or [], top_queries, watermarks,
+                                          shards=shards, blocks=blocks, allocation=allocation)
         for section, reason in collection_errors.items():
             findings.append(
                 Translator.t(lang, "finding_collection_failed", section=Translator.section_label(lang, section),
@@ -158,12 +173,15 @@ class AnalyzerCli:
                 "top_queries_type": query_type,
                 "top_queries": top_queries,
                 "disk_watermarks": watermarks,
+                "shards": shards,
+                "blocks": blocks,
+                "allocation_explain": allocation,
                 "collection_errors": collection_errors,
                 "findings": findings,
             }, indent=2))
         else:
             ReportPrinter.print_report(lang, client.host, cluster, indices, nodes, top_queries, query_limit,
-                                        watermarks, findings, collection_errors, query_type)
+                                        watermarks, findings, collection_errors, query_type, shards)
 
         return EXIT_FINDINGS if findings else EXIT_OK
 

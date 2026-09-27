@@ -10,6 +10,7 @@ from fakes import FakeClient, make_http_error
 
 from opensearch_analyze import cli
 from opensearch_analyze.cli import AnalyzerCli
+from opensearch_analyze.collectors import SHARDS_PATH
 from opensearch_analyze.constants import EXIT_ERROR, EXIT_FINDINGS, EXIT_OK
 
 HEALTHY_CLUSTER = {
@@ -30,8 +31,10 @@ def _healthy_responses():
     return {
         "/_cluster/health": dict(HEALTHY_CLUSTER),
         "/_stats/search,indexing,store,docs,merge,query_cache,request_cache": dict(EMPTY_INDEX_STATS),
-        "/_nodes/stats/thread_pool,jvm,breaker,fs": dict(EMPTY_NODE_STATS),
+        "/_nodes/stats/thread_pool,jvm,breaker,fs,process,os": dict(EMPTY_NODE_STATS),
         "/_cluster/settings?include_defaults=true": dict(EMPTY_WATERMARKS),
+        SHARDS_PATH: [],
+        "/_cluster/state/blocks": {"blocks": {}},
         "/_insights/top_queries?type=latency&verbose=true": make_http_error(404),
     }
 
@@ -55,7 +58,7 @@ def test_run_once_returns_error_when_cluster_health_unreachable(capsys):
 
 def test_run_once_degrades_gracefully_when_one_collector_fails(capsys):
     responses = _healthy_responses()
-    responses["/_nodes/stats/thread_pool,jvm,breaker,fs"] = make_http_error(403)
+    responses["/_nodes/stats/thread_pool,jvm,breaker,fs,process,os"] = make_http_error(403)
     client = FakeClient(responses)
     rc = AnalyzerCli.run_once(client, "en", as_json=False, query_type="latency", query_limit=10)
     # cluster + indices still produced a report; the node-stats failure is
@@ -67,7 +70,7 @@ def test_run_once_degrades_gracefully_when_one_collector_fails(capsys):
 
 def test_run_once_json_output_includes_collection_errors(capsys):
     responses = _healthy_responses()
-    responses["/_nodes/stats/thread_pool,jvm,breaker,fs"] = make_http_error(500)
+    responses["/_nodes/stats/thread_pool,jvm,breaker,fs,process,os"] = make_http_error(500)
     client = FakeClient(responses)
     rc = AnalyzerCli.run_once(client, "en", as_json=True, query_type="latency", query_limit=10)
     assert rc == EXIT_FINDINGS
@@ -224,3 +227,29 @@ def test_main_loads_project_dotenv_from_other_cwd(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.argv", ["prog"])
     AnalyzerCli.main()
     assert seen["host"] == "https://from-project:9200"
+
+
+def test_run_once_explains_allocation_only_when_shards_unassigned(capsys):
+    responses = _healthy_responses()
+    # Not in the healthy responses: FakeClient would raise KeyError if called.
+    AnalyzerCli.run_once(FakeClient(responses), "en", as_json=True, query_type="latency", query_limit=0)
+    assert _json.loads(capsys.readouterr().out)["allocation_explain"] is None
+
+    responses["/_cluster/health"] = {**HEALTHY_CLUSTER, "status": "yellow", "unassigned_shards": 1}
+    responses["/_cluster/allocation/explain"] = {
+        "index": "logs", "shard": 0, "primary": True, "unassigned_info": {"reason": "NODE_LEFT"},
+        "allocate_explanation": "cannot allocate", "node_allocation_decisions": [],
+    }
+    rc = AnalyzerCli.run_once(FakeClient(responses), "en", as_json=True, query_type="latency", query_limit=0)
+    assert rc == EXIT_FINDINGS
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["allocation_explain"]["index"] == "logs"
+    assert "shard [logs][0] (primary) unassigned: cannot allocate" in payload["findings"]
+
+
+def test_run_once_blocks_failure_degrades_gracefully(capsys):
+    responses = _healthy_responses()
+    responses["/_cluster/state/blocks"] = make_http_error(403, body=b"nope")
+    rc = AnalyzerCli.run_once(FakeClient(responses), "en", as_json=False, query_type="latency", query_limit=0)
+    assert rc == EXIT_FINDINGS
+    assert "could not collect index blocks: missing permission" in capsys.readouterr().out
