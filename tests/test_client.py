@@ -1,5 +1,10 @@
+import io
 import ssl
+from urllib.error import URLError
 
+import pytest
+
+from opensearch_analyze import client as client_module
 from opensearch_analyze.client import OpenSearchClient
 
 
@@ -49,3 +54,45 @@ def test_insecure_https_uses_public_ssl_api_and_disables_verification():
 def test_verified_https_has_no_special_context():
     client = OpenSearchClient("https://x", verify_tls=True)
     assert client._ssl_context is None
+
+
+def test_has_credentials_flag():
+    assert OpenSearchClient("http://x", username="u", password="p").has_credentials is True
+    assert OpenSearchClient("http://x").has_credentials is False
+
+
+class _Response:
+    def __init__(self, read):
+        self.read = read
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _raise(exc):
+    def read(*_args):
+        raise exc
+    return read
+
+
+@pytest.mark.parametrize("exc", [TimeoutError("timed out"), ConnectionResetError("reset")])
+def test_get_wraps_errors_while_reading_body_in_urlerror(monkeypatch, exc):
+    monkeypatch.setattr(client_module, "urlopen", lambda *a, **k: _Response(_raise(exc)))
+    with pytest.raises(URLError) as excinfo:
+        OpenSearchClient("http://x").get("/")
+    assert excinfo.value.reason is exc
+
+
+def test_get_wraps_invalid_json_in_urlerror(monkeypatch):
+    monkeypatch.setattr(client_module, "urlopen", lambda *a, **k: _Response(io.BytesIO(b"<html>").read))
+    with pytest.raises(URLError) as excinfo:
+        OpenSearchClient("http://x").get("/")
+    assert isinstance(excinfo.value.reason, ValueError)
+
+
+def test_get_returns_decoded_json(monkeypatch):
+    monkeypatch.setattr(client_module, "urlopen", lambda *a, **k: _Response(io.BytesIO(b'{"a": 1}').read))
+    assert OpenSearchClient("http://x").get("/") == {"a": 1}

@@ -9,9 +9,10 @@ class FakeClient:
     """Stands in for OpenSearchClient: .get(path) returns canned data or
     raises a canned exception, keyed by path."""
 
-    def __init__(self, responses: dict, host: str = "http://fake:9200"):
+    def __init__(self, responses: dict, host: str = "http://fake:9200", has_credentials: bool = False):
         self.responses = responses
         self.host = host
+        self.has_credentials = has_credentials
 
     def get(self, path: str):
         value = self.responses[path]

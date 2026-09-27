@@ -30,11 +30,19 @@ def test_index_stats_skips_dot_indices_and_computes_ratios():
                 ".kibana": {"primaries": {}},
                 "logs": {
                     "primaries": {
-                        "search": {"query_total": 4, "query_time_in_millis": 100, "fetch_total": 1,
-                                   "scroll_total": 0},
+                        "search": {"query_total": 2, "query_time_in_millis": 60},
                         "indexing": {"index_total": 50, "index_failed": 2},
                         "docs": {"count": 1000},
                         "store": {"size_in_bytes": 2048},
+                        "query_cache": {"hit_count": 1, "miss_count": 1},
+                        "request_cache": {"hit_count": 1, "miss_count": 1},
+                    },
+                    "total": {
+                        "search": {"query_total": 4, "query_time_in_millis": 100, "fetch_total": 1,
+                                   "scroll_total": 0},
+                        "indexing": {"index_total": 100, "index_failed": 2},
+                        "docs": {"count": 2000},
+                        "store": {"size_in_bytes": 4096},
                         "merges": {"current": 0},
                         "query_cache": {"hit_count": 3, "miss_count": 1},
                         "request_cache": {"hit_count": 9, "miss_count": 1},
@@ -47,13 +55,19 @@ def test_index_stats_skips_dot_indices_and_computes_ratios():
     assert len(rows) == 1
     row = rows[0]
     assert row["index"] == "logs"
+    # Searches/caches run on replicas too, so they come from "total"...
+    assert row["query_total"] == 4
     assert row["avg_query_ms"] == 25.0
     assert row["query_cache_hit_ratio"] == 75.0
     assert row["request_cache_hit_ratio"] == 90.0
     assert row["indexing_failed"] == 2
+    # ...while docs/size/indexing count each document once (primaries).
+    assert row["docs_count"] == 1000
+    assert row["store_size_bytes"] == 2048
+    assert row["indexing_total"] == 50
 
 
-def test_index_stats_handles_zero_totals_without_division_error():
+def test_index_stats_cache_ratio_is_none_without_samples():
     client = FakeClient({
         "/_stats/search,indexing,store,docs,merge,query_cache,request_cache": {
             "indices": {
@@ -63,8 +77,8 @@ def test_index_stats_handles_zero_totals_without_division_error():
     })
     rows = OpenSearchCollector(client).index_stats()
     assert rows[0]["avg_query_ms"] == 0.0
-    assert rows[0]["query_cache_hit_ratio"] == 0.0
-    assert rows[0]["request_cache_hit_ratio"] == 0.0
+    assert rows[0]["query_cache_hit_ratio"] is None
+    assert rows[0]["request_cache_hit_ratio"] is None
 
 
 def test_node_stats_computes_disk_percent_and_sorts_by_name():
@@ -95,14 +109,20 @@ def test_node_stats_computes_disk_percent_and_sorts_by_name():
 
 
 @pytest.mark.parametrize("value,expected", [
-    (None, None),
-    ("85%", 85.0),
-    ("90.5%", 90.5),
-    ("50gb", None),
-    ("not-a-percent", None),
+    (None, (None, None)),
+    ("85%", (85.0, None)),
+    ("90.5%", (90.5, None)),
+    ("0.85", (85.0, None)),
+    ("1.5", (None, None)),
+    ("50gb", (None, 50 * 1024 ** 3)),
+    ("512MB", (None, 512 * 1024 ** 2)),
+    ("1.5t", (None, int(1.5 * 1024 ** 4))),
+    ("100b", (None, 100)),
+    ("50xb", (None, None)),
+    ("not-a-percent", (None, None)),
 ])
-def test_parse_watermark_percent(value, expected):
-    assert OpenSearchCollector.parse_watermark_percent(value) == expected
+def test_parse_watermark(value, expected):
+    assert OpenSearchCollector.parse_watermark(value) == expected
 
 
 def test_disk_watermarks_uses_transient_over_persistent_over_defaults():
@@ -118,7 +138,10 @@ def test_disk_watermarks_uses_transient_over_persistent_over_defaults():
         },
     })
     result = OpenSearchCollector(client).disk_watermarks()
-    assert result == {"low": 70.0, "high": 80.0, "flood_stage": 95.0}
+    assert result == {
+        "low": 70.0, "high": 80.0, "flood_stage": 95.0,
+        "low_free_bytes": None, "high_free_bytes": None, "flood_stage_free_bytes": None,
+    }
 
 
 def test_disk_watermarks_falls_back_to_documented_defaults_when_missing():
@@ -132,10 +155,11 @@ def test_disk_watermarks_falls_back_to_documented_defaults_when_missing():
         "low": DISK_WATERMARK_DEFAULT_LOW,
         "high": DISK_WATERMARK_DEFAULT_HIGH,
         "flood_stage": DISK_WATERMARK_DEFAULT_FLOOD,
+        "low_free_bytes": None, "high_free_bytes": None, "flood_stage_free_bytes": None,
     }
 
 
-def test_disk_watermarks_leaves_absolute_size_unresolved_not_defaulted():
+def test_disk_watermarks_keeps_absolute_size_as_free_bytes_not_defaulted():
     client = FakeClient({
         "/_cluster/settings?include_defaults=true": {
             "transient": {}, "persistent": {},
@@ -146,23 +170,27 @@ def test_disk_watermarks_leaves_absolute_size_unresolved_not_defaulted():
     })
     result = OpenSearchCollector(client).disk_watermarks()
     # Configured explicitly as an absolute size: must NOT be silently
-    # replaced by the percent-based default (that would misrepresent an
-    # intentional admin setting).
+    # replaced by the percent-based default, but kept as min. free space.
     assert result["low"] is None
+    assert result["low_free_bytes"] == 50 * 1024 ** 3
     assert result["high"] == 90.0
+    assert result["high_free_bytes"] is None
 
 
-def test_top_queries_returns_none_when_plugin_absent():
-    for code in (400, 403, 404):
+def test_top_queries_returns_none_when_plugin_absent_or_metric_disabled():
+    for code in (400, 404):
         client = FakeClient({
             "/_insights/top_queries?type=latency&verbose=true": make_http_error(code),
         })
         assert OpenSearchCollector(client).top_queries() is None
 
 
-def test_top_queries_reraises_unexpected_errors():
+@pytest.mark.parametrize("code", [403, 500])
+def test_top_queries_reraises_permission_and_server_errors(code):
+    # 403 means the plugin is there but the user lacks permission: a
+    # misconfiguration to report, not "plugin absent".
     client = FakeClient({
-        "/_insights/top_queries?type=latency&verbose=true": make_http_error(500),
+        "/_insights/top_queries?type=latency&verbose=true": make_http_error(code),
     })
     with pytest.raises(HTTPError):
         OpenSearchCollector(client).top_queries()
@@ -186,3 +214,30 @@ def test_top_queries_sorts_by_latency_desc_and_applies_limit():
     assert len(rows) == 1
     assert rows[0]["id"] == "b"
     assert rows[0]["latency_ms"] == 900
+
+
+def _top_query(qid, latency, cpu, memory):
+    return {"id": qid, "timestamp": 0, "indices": ["i1"], "search_type": "query_then_fetch",
+            "total_shards": 1, "node_id": "n1", "source": {"query": {"match_all": {}}},
+            "measurements": {"latency": {"number": latency}, "cpu": {"number": cpu},
+                             "memory": {"number": memory}}}
+
+
+@pytest.mark.parametrize("query_type,expected_ids", [
+    ("latency", ["slow", "hungry"]),
+    ("cpu", ["busy", "slow"]),
+    ("memory", ["hungry", "busy"]),
+])
+def test_top_queries_ranks_by_requested_metric(query_type, expected_ids):
+    client = FakeClient({
+        f"/_insights/top_queries?type={query_type}&verbose=true": {
+            "top_queries": [
+                _top_query("slow", latency=900, cpu=2_000_000, memory=10),
+                _top_query("busy", latency=10, cpu=9_000_000, memory=500),
+                _top_query("hungry", latency=500, cpu=1_000_000, memory=9000),
+            ],
+        },
+    })
+    rows = OpenSearchCollector(client).top_queries(query_type, limit=2)
+    assert rows is not None
+    assert [r["id"] for r in rows] == expected_ids
