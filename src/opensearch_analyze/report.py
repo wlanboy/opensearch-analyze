@@ -4,11 +4,16 @@ import textwrap
 from datetime import datetime
 
 from .constants import QUERY_COLUMN_WRAP
+from .findings import FindingsBuilder
 from .formatting import Formatter
 from .i18n import Translator
 
 
 class ReportPrinter:
+    @staticmethod
+    def format_ratio(ratio: float | None) -> str:
+        return "-" if ratio is None else f"{ratio:.1f}"
+
     @staticmethod
     def print_table(lang: str, headers: list, rows: list, wrap_widths: dict | None = None) -> None:
         """Print an aligned table. wrap_widths maps column index -> max width;
@@ -45,18 +50,18 @@ class ReportPrinter:
     @classmethod
     def print_report(cls, lang: str, host: str, cluster: dict, indices: list | None, nodes: list | None,
                       top_queries, query_limit: int, watermarks: dict | None, findings: list,
-                      collection_errors: dict | None = None) -> None:
+                      collection_errors: dict | None = None, query_type: str = "latency") -> None:
         collection_errors = collection_errors or {}
         watermarks = watermarks or {}
         ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
         print(Translator.t(lang, "report_header", host=host, ts=ts))
         print("=" * 70)
 
-        def fmt_wm(v):
-            return f"{v:.0f}%" if v is not None else "n/a"
+        def fmt_wm(key):
+            return FindingsBuilder.format_watermark(lang, watermarks, key) or "n/a"
 
-        print(Translator.t(lang, "watermarks_line", low=fmt_wm(watermarks.get("low")),
-                            high=fmt_wm(watermarks.get("high")), flood=fmt_wm(watermarks.get("flood_stage"))))
+        print(Translator.t(lang, "watermarks_line", low=fmt_wm("low"), high=fmt_wm("high"),
+                            flood=fmt_wm("flood_stage")))
 
         print(f"\n{Translator.t(lang, 'title_cluster')}")
         cls.print_table(
@@ -80,7 +85,7 @@ class ReportPrinter:
                 [[
                     i["index"], i["docs_count"], Formatter.format_bytes(i["store_size_bytes"]), i["query_total"],
                     Formatter.format_ms(i["avg_query_ms"]), i["indexing_total"], i["indexing_failed"],
-                    f"{i['query_cache_hit_ratio']:.1f}", f"{i['request_cache_hit_ratio']:.1f}",
+                    cls.format_ratio(i["query_cache_hit_ratio"]), cls.format_ratio(i["request_cache_hit_ratio"]),
                 ] for i in indices],
             )
 
@@ -99,12 +104,14 @@ class ReportPrinter:
                 ] for n in nodes],
             )
 
+        metric = Translator.t(lang, f"metric_{query_type}")
         if query_limit > 0 and top_queries is None:
             print(f"\n{Translator.t(lang, 'title_long_queries')}")
-            reason = collection_errors.get("top_queries")
-            print(f"  {reason if reason else Translator.t(lang, 'long_queries_plugin_unavailable_msg')}")
+            reason = collection_errors.get("top_queries") \
+                or Translator.t(lang, "long_queries_plugin_unavailable_msg", metric=metric, type=query_type)
+            print(f"  {reason}")
         elif query_limit > 0:
-            print(f"\n{Translator.t(lang, 'section_long_queries', n=len(top_queries))}")
+            print(f"\n{Translator.t(lang, 'section_long_queries', n=len(top_queries), metric=metric)}")
             cls.print_table(
                 lang,
                 Translator.headers(lang, "headers_long_queries"),

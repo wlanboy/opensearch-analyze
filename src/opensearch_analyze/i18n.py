@@ -116,17 +116,21 @@ STRINGS = {
     },
     "title_long_queries": {"en": "Long-running queries", "de": "Lang laufende Abfragen"},
     "section_long_queries": {
-        "en": "Long-running queries (top {n} by latency, Query Insights)",
-        "de": "Lang laufende Abfragen (Top {n} nach Latenz, Query Insights)",
+        "en": "Long-running queries (top {n} by {metric}, Query Insights)",
+        "de": "Lang laufende Abfragen (Top {n} nach {metric}, Query Insights)",
     },
+    "metric_latency": {"en": "latency", "de": "Latenz"},
+    "metric_cpu": {"en": "CPU time", "de": "CPU-Zeit"},
+    "metric_memory": {"en": "memory", "de": "Speicher"},
     "headers_long_queries": {
         "en": ["latency", "cpu", "memory", "indices", "shards", "search_type", "at", "query"],
         "de": ["latenz", "cpu", "speicher", "indizes", "shards", "suchtyp", "um", "abfrage"],
     },
     "long_queries_plugin_unavailable_msg": {
-        "en": "Query Insights plugin not available on this cluster (GET /_insights/top_queries failed)",
-        "de": "Query-Insights-Plugin auf diesem Cluster nicht verfügbar (GET /_insights/top_queries "
-              "fehlgeschlagen)",
+        "en": "Query Insights plugin not installed, or top-N collection for {metric} not enabled "
+              "(search.insights.top_queries.{type}.enabled)",
+        "de": "Query-Insights-Plugin nicht installiert oder Top-N-Erfassung für {metric} nicht aktiviert "
+              "(search.insights.top_queries.{type}.enabled)",
     },
     "section_findings": {"en": "Findings ({n})", "de": "Befunde ({n})"},
     "no_issues": {"en": "no issues detected", "de": "keine Probleme festgestellt"},
@@ -160,23 +164,24 @@ STRINGS = {
         "de": "Node '{node}': Circuit Breaker {n} Mal ausgelöst",
     },
     "finding_disk_flood": {
-        "en": "node '{node}': disk at {pct}% >= flood-stage watermark ({wm}%) — indices on this node are "
-              "likely forced read-only",
-        "de": "Node '{node}': Disk bei {pct}% >= Flood-Stage-Watermark ({wm}%) — Indizes auf diesem Node sind "
-              "vermutlich auf Read-Only gesetzt",
+        "en": "node '{node}': disk at {pct}% ({free} free) reached flood-stage watermark ({wm}) — indices on "
+              "this node are likely forced read-only",
+        "de": "Node '{node}': Disk bei {pct}% ({free} frei) hat Flood-Stage-Watermark ({wm}) erreicht — "
+              "Indizes auf diesem Node sind vermutlich auf Read-Only gesetzt",
     },
     "finding_disk_high": {
-        "en": "node '{node}': disk at {pct}% >= high watermark ({wm}%) — shards are being relocated off this "
-              "node",
-        "de": "Node '{node}': Disk bei {pct}% >= High-Watermark ({wm}%) — Shards werden von diesem Node "
-              "wegverlagert",
+        "en": "node '{node}': disk at {pct}% ({free} free) reached high watermark ({wm}) — shards are being "
+              "relocated off this node",
+        "de": "Node '{node}': Disk bei {pct}% ({free} frei) hat High-Watermark ({wm}) erreicht — Shards werden "
+              "von diesem Node wegverlagert",
     },
     "finding_disk_low": {
-        "en": "node '{node}': disk at {pct}% >= low watermark ({wm}%) — no new shards will be allocated to "
-              "this node",
-        "de": "Node '{node}': Disk bei {pct}% >= Low-Watermark ({wm}%) — es werden keine neuen Shards mehr auf "
-              "diesen Node verteilt",
+        "en": "node '{node}': disk at {pct}% ({free} free) reached low watermark ({wm}) — no new shards will "
+              "be allocated to this node",
+        "de": "Node '{node}': Disk bei {pct}% ({free} frei) hat Low-Watermark ({wm}) erreicht — es werden "
+              "keine neuen Shards mehr auf diesen Node verteilt",
     },
+    "watermark_min_free": {"en": "min. {size} free", "de": "mind. {size} frei"},
     "finding_slow_queries": {
         "en": "{count} {word} >= {ms}ms (worst: {worst_ms}ms on {indices})",
         "de": "{count} {word} >= {ms}ms (schlimmste: {worst_ms}ms bei {indices})",
@@ -185,13 +190,27 @@ STRINGS = {
         "en": "could not collect {section}: {reason}",
         "de": "Sammlung von {section} fehlgeschlagen: {reason}",
     },
-    "err_auth": {
-        "en": "OpenSearch rejected the request with HTTP {code} for {url} — the security plugin is likely "
-              "active; pass --user/--password, --api-key or --bearer-token (or the matching OPENSEARCH_* env "
-              "vars)",
-        "de": "OpenSearch hat den Request mit HTTP {code} für {url} abgelehnt — vermutlich ist das "
-              "Security-Plugin aktiv; --user/--password, --api-key oder --bearer-token angeben (oder die "
-              "passenden OPENSEARCH_*-Umgebungsvariablen)",
+    "err_auth_missing": {
+        "en": "OpenSearch rejected the request with HTTP {code} for {url} — the security plugin is active; "
+              "pass --user/--password, --api-key or --bearer-token (or the matching OPENSEARCH_* env vars, "
+              "e.g. via ./adduser.sh)",
+        "de": "OpenSearch hat den Request mit HTTP {code} für {url} abgelehnt — das Security-Plugin ist aktiv; "
+              "--user/--password, --api-key oder --bearer-token angeben (oder die passenden "
+              "OPENSEARCH_*-Umgebungsvariablen, z. B. über ./adduser.sh)",
+    },
+    "err_auth_rejected": {
+        "en": "OpenSearch rejected the credentials with HTTP 401 for {url} — check user/password, API key or "
+              "token (for the local stack: re-run ./adduser.sh, e.g. after the volumes were recreated)",
+        "de": "OpenSearch hat die Zugangsdaten mit HTTP 401 für {url} abgelehnt — User/Passwort, API-Key oder "
+              "Token prüfen (lokaler Stack: ./adduser.sh erneut ausführen, z. B. nach neu angelegten Volumes)",
+    },
+    "err_forbidden": {
+        "en": "missing permission (HTTP 403) for {url}: {reason}",
+        "de": "fehlende Berechtigung (HTTP 403) für {url}: {reason}",
+    },
+    "err_invalid_response": {
+        "en": "OpenSearch at {host} returned a response that is not valid JSON: {reason}",
+        "de": "OpenSearch unter {host} lieferte eine Antwort, die kein gültiges JSON ist: {reason}",
     },
     "err_http": {
         "en": "OpenSearch returned HTTP {code} for {url}: {body}",
