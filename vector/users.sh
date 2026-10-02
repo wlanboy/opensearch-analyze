@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Schaltet Auth und TLS für eine mit vector/install.sh installierte OpenSearch ein
-# und legt zwei User an:
-#   ADMIN_USER (Default admin)  darf alles (all_access + Security-REST-API)
-#   AGENT_USER (Default agent)  darf in AGENT_INDEX_PATTERNS Indizes und Mappings
-#                               anlegen, Dokumente/Vektoren schreiben, ändern,
-#                               löschen und suchen, aber keine Indizes löschen
+# und legt drei User an:
+#   ADMIN_USER (Default admin)   darf alles (all_access + Security-REST-API)
+#   AGENT_USER (Default agent)   darf in AGENT_INDEX_PATTERNS Indizes und Mappings
+#                                anlegen, Dokumente/Vektoren schreiben, ändern,
+#                                löschen und suchen, aber keine Indizes löschen
+#                                (für die Ingest-Pipeline)
+#   SEARCH_USER (Default search) darf in SEARCH_INDEX_PATTERNS nur suchen und
+#                                lesen (für Agents, die Handbücher durchsuchen)
 #
 # Ablauf (jeder Schritt wird übersprungen, wenn er schon erledigt ist):
 #   1. Zertifikate unter BASE_DIR/config/certs: eigene CA, Node-Zertifikat
@@ -33,11 +36,11 @@ usage() {
 Usage: $0 [--config <datei>] [--rotate]
 
   --config <datei>  Variablen-Datei (Default: $SCRIPT_DIR/install.env, falls vorhanden)
-  --rotate          Neue Passwörter für Admin und Agent erzeugen
+  --rotate          Neue Passwörter für alle drei User erzeugen
   -h, --help        Diese Hilfe
 
-Feste Passwörter statt generierter: ADMIN_PASSWORD / AGENT_PASSWORD als
-Umgebungsvariable setzen. Weitere Variablen siehe install.env.example.
+Feste Passwörter statt generierter: ADMIN_PASSWORD / AGENT_PASSWORD /
+SEARCH_PASSWORD als Umgebungsvariable setzen. Weitere Variablen siehe install.env.example.
 EOF
 }
 
@@ -77,11 +80,15 @@ ADMIN_USER="${ADMIN_USER:-admin}"
 AGENT_USER="${AGENT_USER:-agent}"
 AGENT_ROLE="${AGENT_ROLE:-vector_agent}"
 AGENT_INDEX_PATTERNS="${AGENT_INDEX_PATTERNS:-*}"   # Komma-getrennt, z.B. "vectors-*,rag-*"
+SEARCH_USER="${SEARCH_USER:-search}"
+SEARCH_ROLE="${SEARCH_ROLE:-vector_search}"
+SEARCH_INDEX_PATTERNS="${SEARCH_INDEX_PATTERNS:-$AGENT_INDEX_PATTERNS}"
 CERT_DAYS="${CERT_DAYS:-3650}"
 EXTRA_SANS="${EXTRA_SANS:-}"                        # weitere Hostnamen/IPs fürs Node-Zertifikat
 # Feste Passwörter nur als Umgebungsvariable, nicht in install.env eintragen.
 ADMIN_PASSWORD_ARG="${ADMIN_PASSWORD:-}"
 AGENT_PASSWORD_ARG="${AGENT_PASSWORD:-}"
+SEARCH_PASSWORD_ARG="${SEARCH_PASSWORD:-}"
 
 # --- Hilfsfunktionen ----------------------------------------------------------
 
@@ -339,12 +346,14 @@ done
 
 OPENSEARCH_ADMIN_PASSWORD=""
 OPENSEARCH_AGENT_PASSWORD=""
+OPENSEARCH_SEARCH_PASSWORD=""
 if [ -f "$USERS_ENV" ] && [ "$ROTATE" = "false" ]; then
     # shellcheck disable=SC1090
     source "$USERS_ENV"
 fi
 ADMIN_PW="${ADMIN_PASSWORD_ARG:-${OPENSEARCH_ADMIN_PASSWORD:-$(gen_password)}}"
 AGENT_PW="${AGENT_PASSWORD_ARG:-${OPENSEARCH_AGENT_PASSWORD:-$(gen_password)}}"
+SEARCH_PW="${SEARCH_PASSWORD_ARG:-${OPENSEARCH_SEARCH_PASSWORD:-$(gen_password)}}"
 
 # Vor den API-Aufrufen speichern, damit ein Abbruch kein Passwort verliert.
 {
@@ -355,6 +364,8 @@ AGENT_PW="${AGENT_PASSWORD_ARG:-${OPENSEARCH_AGENT_PASSWORD:-$(gen_password)}}"
     printf 'OPENSEARCH_ADMIN_PASSWORD=%q\n' "$ADMIN_PW"
     printf 'OPENSEARCH_AGENT_USER=%q\n' "$AGENT_USER"
     printf 'OPENSEARCH_AGENT_PASSWORD=%q\n' "$AGENT_PW"
+    printf 'OPENSEARCH_SEARCH_USER=%q\n' "$SEARCH_USER"
+    printf 'OPENSEARCH_SEARCH_PASSWORD=%q\n' "$SEARCH_PW"
 } | write_file "$USERS_ENV" 0600
 
 # --- 5. User, Rolle, Mapping --------------------------------------------------
@@ -424,6 +435,42 @@ api PUT "/_plugins/_security/api/rolesmapping/$AGENT_ROLE" <<EOF
 EOF
 api_ok "Rollen-Mapping $AGENT_ROLE"
 
+# Nur lesen: Suchen (inkl. k-NN/hybrid über die Default-Search-Pipeline des
+# Index), Dokumente holen, Mapping ansehen. Schreiben darf der Search-User nicht,
+# denn Handbuchtexte landen ungefiltert im Prompt der Agents.
+log "Lege Rolle $SEARCH_ROLE an (Index-Muster: $SEARCH_INDEX_PATTERNS)"
+api PUT "/_plugins/_security/api/roles/$SEARCH_ROLE" <<EOF
+{
+  "description": "Vektor-Daten nur lesen und suchen (vector/users.sh)",
+  "cluster_permissions": [
+    "cluster_composite_ops_ro",
+    "indices:data/read/scroll*"
+  ],
+  "index_permissions": [{
+    "index_patterns": $(json_list "$SEARCH_INDEX_PATTERNS"),
+    "allowed_actions": [
+      "read",
+      "indices:admin/mappings/get",
+      "indices:admin/resolve/index",
+      "indices:admin/aliases/get"
+    ]
+  }]
+}
+EOF
+api_ok "Anlegen der Rolle $SEARCH_ROLE"
+
+log "Lege User $SEARCH_USER an ($SEARCH_ROLE)"
+api PUT "/_plugins/_security/api/internalusers/$SEARCH_USER" <<EOF
+{"password": "$(json_escape "$SEARCH_PW")", "backend_roles": [],
+ "description": "Such-Agent, liest Vektor-Daten (vector/users.sh)"}
+EOF
+api_ok "Anlegen von $SEARCH_USER"
+
+api PUT "/_plugins/_security/api/rolesmapping/$SEARCH_ROLE" <<EOF
+{"users": ["$(json_escape "$SEARCH_USER")"], "description": "vector/users.sh"}
+EOF
+api_ok "Rollen-Mapping $SEARCH_ROLE"
+
 # --- 6. Prüfen ----------------------------------------------------------------
 
 # Zugangsdaten per stdin an curl, damit sie nicht in der Prozessliste stehen.
@@ -437,16 +484,20 @@ check_login() {
 }
 check_login "$ADMIN_USER" "$ADMIN_PW"
 check_login "$AGENT_USER" "$AGENT_PW"
+check_login "$SEARCH_USER" "$SEARCH_PW"
 
 cat <<EOF
 
 Fertig: Auth und TLS aktiv auf $URL
   Admin:          $ADMIN_USER (all_access)
-  Agent:          $AGENT_USER (Rolle $AGENT_ROLE auf $AGENT_INDEX_PATTERNS)
+  Agent:          $AGENT_USER (Rolle $AGENT_ROLE auf $AGENT_INDEX_PATTERNS, schreiben)
+  Search:         $SEARCH_USER (Rolle $SEARCH_ROLE auf $SEARCH_INDEX_PATTERNS, nur lesen)
   Passwörter:     $USERS_ENV
   CA-Zertifikat:  $CERT_DIR/root-ca.pem (für Clients)
   Admin-Zert.:    $CERT_DIR/admin.pem + admin-key.pem (Notzugang, nutzen bin/*.sh)
 
 Test:  source $USERS_ENV
        curl --cacert "\$OPENSEARCH_CACERT" -u "\$OPENSEARCH_AGENT_USER:\$OPENSEARCH_AGENT_PASSWORD" $URL/_cat/indices
+
+Index-Template und Search-Pipeline für Handbücher: vector/index.sh
 EOF
