@@ -3,53 +3,42 @@
 #   opensearch-min-<V>-linux-<arch>.tar.gz + .sha512   (artifacts.opensearch.org)
 #   opensearch-knn-<V>.0.zip                          (ci.opensearch.org, mit faiss)
 #   opensearch-neural-search-<V>.0.zip                (ci.opensearch.org, außer NEURAL_SEARCH=false)
-#   opensearch-security-<V>.0.zip + .sha512           (Maven Central, nur mit --security
+#   opensearch-security-<V>.0.zip + .sha512           (Maven Central, mit DOWNLOAD_SECURITY=true
 #                                                      oder wenn users.sh Auth eingeschaltet hat)
 #
 # Die k-NN- und neural-search-Zips kommen aus dem Distribution-Build auf
 # ci.opensearch.org, weil das Zip auf Maven Central keine nativen Libraries
 # enthält (siehe README). Die Build-ID wird aus dem Manifest des Builds gelesen.
 #
-# Für einen Server ohne Internetzugang auf einem anderen Rechner ausführen, z.B.
-#   vector/download.sh --arch x64 --dest ./os-download
-# und das Verzeichnis per scp ins Home-Verzeichnis des Servers kopieren.
+# Für einen Server ohne Internetzugang auf einem anderen Rechner ausführen, mit
+# z.B. DOWNLOAD_ARCH=x64 und ARTIFACT_DIR=./os-download in einer eigenen
+# install.env (--config), und das Verzeichnis per scp ins Home-Verzeichnis des
+# Servers kopieren.
 #
 # Idempotent: Vorhandene Dateien mit passender Prüfsumme werden nicht erneut
-# geladen. Konfiguration: dieselbe install.env wie install.sh.
+# geladen. Konfiguration: dieselbe install.env (siehe install.env.example).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/install.env"
 DEFAULT_VERSION=3.9.0
-ARG_VERSION=""
-ARG_ARCH=""
-ARG_DEST=""
-WITH_SECURITY=false
 
 usage() {
     cat <<EOF
-Usage: $0 [--config <datei>] [--version <V>] [--arch x64|arm64] [--dest <verz>] [--security]
+Usage: $0 [--config <datei>]
 
   --config <datei>  Variablen-Datei (Default: $SCRIPT_DIR/install.env, falls vorhanden)
-  --version <V>     OpenSearch-Version (Default: OPENSEARCH_VERSION, sonst $DEFAULT_VERSION)
-  --arch <a>        x64 oder arm64 (Default: Architektur dieses Rechners)
-  --dest <verz>     Zielverzeichnis (Default: ARTIFACT_DIR, sonst ~)
-  --security        Auch das Security-Plugin laden (für users.sh)
   -h, --help        Diese Hilfe
 
-Variablen aus install.env: ARTIFACT_DIR, OPENSEARCH_VERSION, NEURAL_SEARCH,
-KNN_SHA512, NEURAL_SHA512, SECURITY_SHA512, BASE_DIR. Zusätzlich BUILD_ID
-(Default: aus dem Manifest auf ci.opensearch.org).
+Variablen: ARTIFACT_DIR (Ziel), OPENSEARCH_VERSION (Default $DEFAULT_VERSION),
+DOWNLOAD_ARCH, DOWNLOAD_SECURITY, BUILD_ID, NEURAL_SEARCH, KNN_SHA512,
+NEURAL_SHA512, SECURITY_SHA512, BASE_DIR. Siehe install.env.example.
 EOF
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --config) CONFIG_FILE="$2"; shift 2 ;;
-        --version) ARG_VERSION="$2"; shift 2 ;;
-        --arch) ARG_ARCH="$2"; shift 2 ;;
-        --dest) ARG_DEST="$2"; shift 2 ;;
-        --security) WITH_SECURITY=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unbekannte Option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -64,12 +53,14 @@ fi
 
 # --- Einstellungen (Defaults) -------------------------------------------------
 
-VERSION="${ARG_VERSION:-${OPENSEARCH_VERSION:-$DEFAULT_VERSION}}"
+VERSION="${OPENSEARCH_VERSION:-$DEFAULT_VERSION}"
 PLUGIN_VERSION="${VERSION}.0"
-DEST="${ARG_DEST:-${ARTIFACT_DIR:-$HOME}}"
+DEST="${ARTIFACT_DIR:-$HOME}"
 DEST="${DEST%/}"
+DOWNLOAD_ARCH="${DOWNLOAD_ARCH:-}"            # leer = Architektur dieses Rechners; sonst x64 oder arm64
+DOWNLOAD_SECURITY="${DOWNLOAD_SECURITY:-auto}" # auto = nur, wenn users.sh Auth eingeschaltet hat; true; false
+BUILD_ID="${BUILD_ID:-}"                      # leer = aus dem Manifest auf ci.opensearch.org
 NEURAL_SEARCH="${NEURAL_SEARCH:-auto}"
-BUILD_ID="${BUILD_ID:-}"
 BASE_DIR="${BASE_DIR:-/opt/local/opensearch}"
 BASE_DIR="${BASE_DIR%/}"
 
@@ -137,11 +128,11 @@ case "$(uname -m)" in
     aarch64|arm64) HOST_ARCH=arm64 ;;
     *) HOST_ARCH="" ;;
 esac
-ARCH="${ARG_ARCH:-$HOST_ARCH}"
+ARCH="${DOWNLOAD_ARCH:-$HOST_ARCH}"
 case "$ARCH" in
     x64|arm64) ;;
-    "") die "Architektur $(uname -m) nicht erkannt, bitte --arch x64 oder --arch arm64 angeben" ;;
-    *) die "--arch muss x64 oder arm64 sein (ist: $ARCH)" ;;
+    "") die "Architektur $(uname -m) nicht erkannt, DOWNLOAD_ARCH=x64 oder arm64 setzen" ;;
+    *) die "DOWNLOAD_ARCH muss x64 oder arm64 sein (ist: $ARCH)" ;;
 esac
 
 # Die SHA-512-Werte in install.env gelten für die Architektur des Servers. Für
@@ -152,8 +143,13 @@ if [ "$ARCH" != "$HOST_ARCH" ]; then
     SECURITY_SHA512=""
 fi
 
-# Security-Plugin auch dann, wenn users.sh Auth auf diesem Rechner eingeschaltet hat.
-[ ! -f "$BASE_DIR/config/opensearch.security.yml" ] || WITH_SECURITY=true
+case "$DOWNLOAD_SECURITY" in
+    true) WITH_SECURITY=true ;;
+    false) WITH_SECURITY=false ;;
+    auto) WITH_SECURITY=false
+          [ ! -f "$BASE_DIR/config/opensearch.security.yml" ] || WITH_SECURITY=true ;;
+    *) die "DOWNLOAD_SECURITY muss auto, true oder false sein (ist: $DOWNLOAD_SECURITY)" ;;
+esac
 
 mkdir -p "$DEST"
 [ -w "$DEST" ] || die "$DEST ist nicht schreibbar"

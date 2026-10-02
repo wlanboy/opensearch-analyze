@@ -160,7 +160,7 @@ heap_size() {
         return
     fi
     # Hälfte des RAMs für den Heap; der Rest bleibt für Page-Cache und die
-    # nativen faiss/nmslib-Graphen (liegen außerhalb des Heaps). Über ~31g
+    # nativen faiss-Graphen (liegen außerhalb des Heaps). Über ~31g
     # verliert die JVM die Compressed OOPs.
     local mem_mb heap_mb
     mem_mb=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 1024 ))
@@ -321,9 +321,9 @@ elif [ -d "$DIST_DIR/plugins/opensearch-security" ]; then
 fi
 
 # Das Zip von Maven Central enthält nur die JARs, das von ci.opensearch.org
-# zusätzlich lib/*.so für faiss/nmslib.
+# zusätzlich lib/*.so für faiss (nmslib ist seit 3.0 veraltet: keine neuen Indizes).
 if [ -f "$DIST_DIR/plugins/opensearch-knn/lib/libopensearchknn_faiss.so" ]; then
-    KNN_ENGINES="faiss, nmslib, lucene"
+    KNN_ENGINES="faiss, lucene"
 else
     KNN_ENGINES="nur lucene"
     warn "k-NN-Zip ohne native Libraries (Maven-Variante?) — nur engine=lucene nutzbar, siehe README"
@@ -548,20 +548,22 @@ source "$(dirname "$(readlink -f "$0")")/env.sh"
 REPO=backup
 
 req() {
-    local method="$1" path="$2" data=() out
+    local method="$1" path="$2" data=() out code
     [ $# -lt 3 ] || data=(-H 'Content-Type: application/json' --data-binary "$3")
-    if ! out="$(curl -sS -f -X "$method" "${OPENSEARCH_CURL_OPTS[@]}" "${data[@]}" \
-        "$OPENSEARCH_URL$path" 2>&1)"; then
-        echo "FEHLER: $method $path: $out" >&2
-        exit 1
-    fi
-    printf '%s' "$out"
+    out="$(curl -sS -w '\n%{http_code}' -X "$method" "${OPENSEARCH_CURL_OPTS[@]}" "${data[@]}" \
+        "$OPENSEARCH_URL$path" 2>&1)" || true
+    code="${out##*$'\n'}"
+    out="${out%$'\n'*}"
+    case "$code" in
+        2??) printf '%s' "$out" ;;
+        *) echo "FEHLER: $method $path (HTTP $code): $out" >&2; exit 1 ;;
+    esac
 }
 
 # Idempotent: legt das Repository an bzw. bestätigt den Pfad.
 req PUT "/_snapshot/$REPO" "{\"type\": \"fs\", \"settings\": {\"location\": \"$OPENSEARCH_SNAPSHOT_DIR\"}}" >/dev/null
 
-name="snap-$(date +%Y%m%d-%H%M%S)"
+name="snap-$(date +%Y%m%d-%H%M%S-%3N)"
 echo "Lege Snapshot $REPO/$name an ..."
 result="$(req PUT "/_snapshot/$REPO/$name?wait_for_completion=true")"
 state="$(grep -o '"state":"[A-Z_]*"' <<<"$result" | head -1 | cut -d'"' -f4)"

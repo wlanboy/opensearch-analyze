@@ -1,7 +1,7 @@
 # Anleitung: OpenSearch + k-NN auf einer RHEL-9-VM
 
 Diese Anleitung führt Schritt für Schritt von einer frischen RHEL-9-VM bis zu einem
-laufenden OpenSearch 2.19.5 mit k-NN-Plugin (faiss, nmslib, lucene). Grundlage ist
+laufenden OpenSearch 3.9.0 mit k-NN-Plugin (faiss, lucene). Grundlage ist
 [install.sh](install.sh). Hintergründe und alle Optionen stehen in
 [README.md](README.md).
 
@@ -92,13 +92,16 @@ ulimit -l    # unlimited
 
 ## Schritt 6: Dateien herunterladen
 
-Hat die VM Internetzugang, direkt ins Home-Verzeichnis laden:
+Hat die VM Internetzugang, direkt ins Home-Verzeichnis laden. Alternativ macht
+das [download.sh](download.sh) (siehe README, Abschnitt 1), es muss dafür wie
+`install.sh` in Schritt 7 auf die VM kopiert werden.
+
 
 ```bash
 cd ~
-curl -fLO https://artifacts.opensearch.org/releases/core/opensearch/2.19.5/opensearch-min-2.19.5-linux-x64.tar.gz
-curl -fLO https://artifacts.opensearch.org/releases/core/opensearch/2.19.5/opensearch-min-2.19.5-linux-x64.tar.gz.sha512
-curl -fLO https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/2.19.5/11769/linux/x64/tar/builds/opensearch/plugins/opensearch-knn-2.19.5.0.zip
+curl -fLO https://artifacts.opensearch.org/releases/core/opensearch/3.9.0/opensearch-min-3.9.0-linux-x64.tar.gz
+curl -fLO https://artifacts.opensearch.org/releases/core/opensearch/3.9.0/opensearch-min-3.9.0-linux-x64.tar.gz.sha512
+curl -fLO https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/3.9.0/12228/linux/x64/tar/builds/opensearch/plugins/opensearch-knn-3.9.0.0.zip
 ```
 
 **Ohne Internetzugang:** Dieselben drei Dateien auf dem eigenen Rechner laden und
@@ -107,10 +110,10 @@ erreichbar ist, oder über den eigenen User:
 
 ```bash
 # auf dem eigenen Rechner
-scp opensearch-min-2.19.5-linux-x64.tar.gz* opensearch-knn-2.19.5.0.zip <ich>@<vm>:/tmp/
+scp opensearch-min-3.9.0-linux-x64.tar.gz* opensearch-knn-3.9.0.0.zip <ich>@<vm>:/tmp/
 
 # auf der VM (als <ich>)
-sudo mv /tmp/opensearch-min-2.19.5-linux-x64.tar.gz* /tmp/opensearch-knn-2.19.5.0.zip ~opensearch/
+sudo mv /tmp/opensearch-min-3.9.0-linux-x64.tar.gz* /tmp/opensearch-knn-3.9.0.0.zip ~opensearch/
 sudo chown opensearch:opensearch ~opensearch/opensearch-*
 ```
 
@@ -118,9 +121,9 @@ Prüfen (als `opensearch`):
 
 ```bash
 ls -lh ~
-# opensearch-knn-2.19.5.0.zip                    ~37M
-# opensearch-min-2.19.5-linux-x64.tar.gz         ~248M
-# opensearch-min-2.19.5-linux-x64.tar.gz.sha512
+# opensearch-knn-3.9.0.0.zip                    ~59M
+# opensearch-min-3.9.0-linux-x64.tar.gz         ~241M
+# opensearch-min-3.9.0-linux-x64.tar.gz.sha512
 ```
 
 ## Schritt 7: Installationsskript auf die VM bringen
@@ -150,8 +153,8 @@ Für den Anfang reichen zwei Zeilen. Alles andere hat sinnvolle Defaults:
 ```bash
 # Heap: Hälfte des RAMs ist Default; auf einer 8-GB-VM z.B.:
 HEAP_SIZE=2g
-# Prüfsumme des k-NN-Zips (2.19.5, x64), siehe README:
-KNN_SHA512=733d6389da08338bb997ebefe660e3fc757e3f8851543c2dd0335481015ae4169d267d9e80834074876076f5161470e9939ef8d5d093323d60f84550c2b0facb
+# Prüfsumme des k-NN-Zips (3.9.0, x64), siehe README:
+KNN_SHA512=5c2edeb3b8b287136393362012ac8067f31660e3b0806a4b77909f4b0f728e1ba271c31c9c7d1cdf1fc1dd23d2865e050e5d54919b56f8b0656318212364c44f
 ```
 
 ## Schritt 8: Installieren und starten
@@ -165,19 +168,19 @@ Als `opensearch`:
 Die Ausgabe sollte ungefähr so aussehen:
 
 ```
-==> Gefundene Version: 2.19.5
-==> Prüfsumme ok: /home/opensearch/opensearch-min-2.19.5-linux-x64.tar.gz
-==> Prüfsumme ok: /home/opensearch/opensearch-knn-2.19.5.0.zip
-==> Entpacke ... nach /opt/local/opensearch/opensearch-2.19.5
-==> Installiere k-NN-Plugin aus /home/opensearch/opensearch-knn-2.19.5.0.zip
+==> Gefundene Version: 3.9.0
+==> Prüfsumme ok: /home/opensearch/opensearch-min-3.9.0-linux-x64.tar.gz
+==> Prüfsumme ok: /home/opensearch/opensearch-knn-3.9.0.0.zip
+==> Entpacke ... nach /opt/local/opensearch/opensearch-3.9.0
+==> Installiere k-NN-Plugin aus /home/opensearch/opensearch-knn-3.9.0.0.zip
 ...
 Warte auf http://127.0.0.1:9200 ...
 OpenSearch läuft (PID 12345)
 
-Fertig: OpenSearch 2.19.5 + k-NN 2.19.5.0 (faiss, nmslib, lucene) unter /opt/local/opensearch
+Fertig: OpenSearch 3.9.0 + k-NN 3.9.0.0 (faiss, lucene) unter /opt/local/opensearch
 ```
 
-Wichtig ist der Text in Klammern: `(faiss, nmslib, lucene)`. Steht dort
+Wichtig ist der Text in Klammern: `(faiss, lucene)`. Steht dort
 `(nur lucene)`, war es das falsche k-NN-Zip, siehe Fehlerbehebung.
 
 ## Schritt 9: Funktion prüfen
@@ -188,7 +191,7 @@ Status und Plugins:
 /opt/local/opensearch/bin/status.sh
 ```
 
-`"status" : "green"` und eine Zeile mit `opensearch-knn 2.19.5.0` müssen erscheinen.
+`"status" : "green"` und eine Zeile mit `opensearch-knn 3.9.0.0` müssen erscheinen.
 
 Ein Test-Index mit faiss-Vektoren, drei Dokumente und eine Suche:
 
@@ -280,8 +283,8 @@ in Schritt 6 per `scp`):
 
 ```bash
 cd ~
-curl -fLO https://repo1.maven.org/maven2/org/opensearch/plugin/opensearch-security/2.19.5.0/opensearch-security-2.19.5.0.zip
-curl -fLO https://repo1.maven.org/maven2/org/opensearch/plugin/opensearch-security/2.19.5.0/opensearch-security-2.19.5.0.zip.sha512
+curl -fLO https://repo1.maven.org/maven2/org/opensearch/plugin/opensearch-security/3.9.0.0/opensearch-security-3.9.0.0.zip
+curl -fLO https://repo1.maven.org/maven2/org/opensearch/plugin/opensearch-security/3.9.0.0/opensearch-security-3.9.0.0.zip.sha512
 ```
 
 `users.sh` wie in Schritt 7 neben `install.sh` nach `~opensearch/` kopieren
@@ -345,7 +348,7 @@ tail -100 /opt/local/opensearch/logs/opensearch-vector.log
 |---|---|
 | `FEHLER: Nicht als root ausführen` | Mit `sudo -iu opensearch` wechseln und dort ausführen |
 | `... existiert nicht oder ist nicht schreibbar` | Schritt 4 fehlt oder der Besitzer stimmt nicht: `sudo chown opensearch:opensearch /opt/local/opensearch` |
-| `opensearch-knn-2.19.5.0.zip nicht in /home/opensearch gefunden` | Datei fehlt oder liegt tiefer als `~/<ordner>/`. Schritt 6 wiederholen |
+| `opensearch-knn-3.9.0.0.zip nicht in /home/opensearch gefunden` | Datei fehlt oder liegt tiefer als `~/<ordner>/`. Schritt 6 wiederholen |
 | `SHA-512 stimmt nicht` | Download unvollständig oder kaputt: Datei löschen und neu laden |
 | `Fertig: ... (nur lucene)` | Das Maven-Zip statt des ci.opensearch.org-Zips wurde verwendet. Richtiges Zip laden (Schritt 6), altes ersetzen und `~/install.sh --restart` ausführen |
 | `max virtual memory areas vm.max_map_count [65530] is too low` | Schritt 3 (sysctl) fehlt |
@@ -354,7 +357,7 @@ tail -100 /opt/local/opensearch/logs/opensearch-vector.log
 | `BindException: Address already in use` | Port 9200/9300 ist schon belegt (`ss -ltnp \| grep 9200`). Anderen Prozess beenden oder `HTTP_PORT`/`TRANSPORT_PORT` ändern |
 | `OutOfMemoryError` / Prozess verschwindet | `HEAP_SIZE` zu groß für die VM (OOM-Killer: `sudo dmesg \| grep -i oom`). Heap verkleinern |
 | `curl: (7) Failed to connect` von außen | `NETWORK_HOST` nicht gesetzt (Schritt 10) oder Firewall zu |
-| `opensearch-security-2.19.5.0.zip nicht in ... gefunden` | Security-Zip fehlt (Schritt 12) |
+| `opensearch-security-3.9.0.0.zip nicht in ... gefunden` | Security-Zip fehlt (Schritt 12) |
 | `curl: (52) Empty reply from server` | Nach Schritt 12 läuft nur noch HTTPS: `https://` verwenden |
 | `curl: (60) SSL certificate problem` | `--cacert /opt/local/opensearch/config/certs/root-ca.pem` angeben (oder `-k`) |
 | `Unauthorized` / HTTP 401 | Falsches Passwort, siehe `config/users.env` |
