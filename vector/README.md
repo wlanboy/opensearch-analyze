@@ -7,6 +7,8 @@ des aktuellen Users, entpackt sie nach `/opt/local/opensearch` und schreibt dort
 Konfiguration. Es legt keine systemd-Unit an, braucht kein root und schreibt nichts
 außerhalb von `/opt/local/opensearch`. Das Skript lässt sich beliebig oft ausführen.
 
+Schritt-für-Schritt-Anleitung für eine frische RHEL-9-VM: [manual.md](manual.md).
+
 ## 1. Dateien herunterladen
 
 Für OpenSearch **2.19.5** (identisch mit der Version in
