@@ -5,6 +5,9 @@
 #   opensearch-neural-search-<V>.0.zip                (ci.opensearch.org, außer NEURAL_SEARCH=false)
 #   opensearch-security-<V>.0.zip + .sha512           (Maven Central, mit DOWNLOAD_SECURITY=true
 #                                                      oder wenn users.sh Auth eingeschaltet hat)
+# Mit DOWNLOAD_DASHBOARDS=true zusätzlich für vector/dashboards.sh:
+#   opensearch-dashboards-min-<V>-linux-<arch>.tar.gz + .sha512   (artifacts.opensearch.org)
+#   securityDashboards-<V>.zip   (ci.opensearch.org, nur wenn auch Security geladen wird)
 #
 # Die k-NN- und neural-search-Zips kommen aus dem Distribution-Build auf
 # ci.opensearch.org, weil das Zip auf Maven Central keine nativen Libraries
@@ -31,7 +34,7 @@ Usage: $0 [--config <datei>]
   -h, --help        Diese Hilfe
 
 Variablen: ARTIFACT_DIR (Ziel), OPENSEARCH_VERSION (Default $DEFAULT_VERSION),
-DOWNLOAD_ARCH, DOWNLOAD_SECURITY, BUILD_ID, NEURAL_SEARCH, KNN_SHA512,
+DOWNLOAD_ARCH, DOWNLOAD_SECURITY, DOWNLOAD_DASHBOARDS, BUILD_ID, DASHBOARDS_BUILD_ID, NEURAL_SEARCH, KNN_SHA512,
 NEURAL_SHA512, SECURITY_SHA512, BASE_DIR. Siehe install.env.example.
 EOF
 }
@@ -60,12 +63,16 @@ DEST="${DEST%/}"
 DOWNLOAD_ARCH="${DOWNLOAD_ARCH:-}"            # leer = Architektur dieses Rechners; sonst x64 oder arm64
 DOWNLOAD_SECURITY="${DOWNLOAD_SECURITY:-auto}" # auto = nur, wenn users.sh Auth eingeschaltet hat; true; false
 BUILD_ID="${BUILD_ID:-}"                      # leer = aus dem Manifest auf ci.opensearch.org
+DOWNLOAD_DASHBOARDS="${DOWNLOAD_DASHBOARDS:-false}" # true = auch OpenSearch Dashboards (dashboards.sh)
+DASHBOARDS_BUILD_ID="${DASHBOARDS_BUILD_ID:-}"      # leer = aus dem Manifest des Dashboards-Builds
 NEURAL_SEARCH="${NEURAL_SEARCH:-auto}"
 BASE_DIR="${BASE_DIR:-/opt/local/opensearch}"
 BASE_DIR="${BASE_DIR%/}"
 
 CORE_URL="https://artifacts.opensearch.org/releases/core/opensearch/$VERSION"
 CI_URL="https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/$VERSION"
+OSD_CORE_URL="https://artifacts.opensearch.org/releases/core/opensearch-dashboards/$VERSION"
+OSD_CI_URL="https://ci.opensearch.org/ci/dbc/distribution-build-opensearch-dashboards/$VERSION"
 MAVEN_URL="https://repo1.maven.org/maven2/org/opensearch/plugin"
 
 # --- Hilfsfunktionen ----------------------------------------------------------
@@ -83,6 +90,12 @@ check_sha512() {
     fi
     [ -n "$sha512" ] || return 2
     echo "$sha512  $file" | sha512sum -c --status
+}
+
+# Liest die Build-ID aus dem manifest.yml unter $1.
+manifest_build_id() {
+    curl -fsSL "$1/manifest.yml" 2>/dev/null \
+        | awk '/^build:/ {b=1; next} b && /^[^ ]/ {exit} b && $1 == "id:" {gsub(/["\047]/, "", $2); print $2; exit}' || true
 }
 
 # Lädt $1 nach $DEST/$2 (über eine .part-Datei, damit nichts Halbes liegen bleibt).
@@ -141,6 +154,7 @@ if [ "$ARCH" != "$HOST_ARCH" ]; then
     KNN_SHA512=""
     NEURAL_SHA512=""
     SECURITY_SHA512=""
+    SECURITY_DASHBOARDS_SHA512=""
 fi
 
 case "$DOWNLOAD_SECURITY" in
@@ -150,6 +164,10 @@ case "$DOWNLOAD_SECURITY" in
           [ ! -f "$BASE_DIR/config/opensearch.security.yml" ] || WITH_SECURITY=true ;;
     *) die "DOWNLOAD_SECURITY muss auto, true oder false sein (ist: $DOWNLOAD_SECURITY)" ;;
 esac
+case "$DOWNLOAD_DASHBOARDS" in
+    true|false) ;;
+    *) die "DOWNLOAD_DASHBOARDS muss true oder false sein (ist: $DOWNLOAD_DASHBOARDS)" ;;
+esac
 
 mkdir -p "$DEST"
 [ -w "$DEST" ] || die "$DEST ist nicht schreibbar"
@@ -157,11 +175,16 @@ mkdir -p "$DEST"
 # --- Build-ID für die CI-Zips ---------------------------------------------------
 
 if [ -z "$BUILD_ID" ]; then
-    BUILD_ID="$(curl -fsSL "$CI_URL/latest/linux/$ARCH/tar/builds/opensearch/manifest.yml" 2>/dev/null \
-        | awk '/^build:/ {b=1; next} b && /^[^ ]/ {exit} b && $1 == "id:" {gsub(/["\047]/, "", $2); print $2; exit}' || true)"
+    BUILD_ID="$(manifest_build_id "$CI_URL/latest/linux/$ARCH/tar/builds/opensearch")"
     [ -n "$BUILD_ID" ] || die "Build-ID für $VERSION nicht gefunden ($CI_URL/latest/...). Gibt es die Version? Sonst BUILD_ID setzen"
 fi
 CI_PLUGINS="$CI_URL/$BUILD_ID/linux/$ARCH/tar/builds/opensearch/plugins"
+
+# Das Dashboards-Plugin securityDashboards kommt aus dem eigenen Dashboards-Build.
+if [ "$DOWNLOAD_DASHBOARDS" = "true" ] && [ "$WITH_SECURITY" = "true" ] && [ -z "$DASHBOARDS_BUILD_ID" ]; then
+    DASHBOARDS_BUILD_ID="$(manifest_build_id "$OSD_CI_URL/latest/linux/$ARCH/tar/builds/opensearch-dashboards")"
+    [ -n "$DASHBOARDS_BUILD_ID" ] || die "Dashboards-Build-ID für $VERSION nicht gefunden ($OSD_CI_URL/latest/...). Sonst DASHBOARDS_BUILD_ID setzen"
+fi
 
 log "OpenSearch $VERSION, $ARCH, CI-Build $BUILD_ID, Ziel $DEST"
 
@@ -180,6 +203,14 @@ if [ "$WITH_SECURITY" = "true" ]; then
     download "$MAVEN_URL/opensearch-security/$PLUGIN_VERSION" "opensearch-security-$PLUGIN_VERSION.zip" true "${SECURITY_SHA512:-}"
 fi
 
+if [ "$DOWNLOAD_DASHBOARDS" = "true" ]; then
+    download "$OSD_CORE_URL" "opensearch-dashboards-min-$VERSION-linux-$ARCH.tar.gz" true ""
+    if [ "$WITH_SECURITY" = "true" ]; then
+        download "$OSD_CI_URL/$DASHBOARDS_BUILD_ID/linux/$ARCH/tar/builds/opensearch-dashboards/plugins" \
+            "securityDashboards-$VERSION.zip" false "${SECURITY_DASHBOARDS_SHA512:-}"
+    fi
+fi
+
 # --- Zusammenfassung ----------------------------------------------------------
 
 # ci.opensearch.org liefert keine .sha512. Die Werte hier können in die
@@ -189,4 +220,7 @@ echo "Fertig. Für install.env (gilt für $ARCH):"
 echo "KNN_SHA512=$(sha512sum "$DEST/opensearch-knn-$PLUGIN_VERSION.zip" | awk '{print $1}')"
 if [ -f "$DEST/opensearch-neural-search-$PLUGIN_VERSION.zip" ] && [ "$NEURAL_SEARCH" != "false" ]; then
     echo "NEURAL_SHA512=$(sha512sum "$DEST/opensearch-neural-search-$PLUGIN_VERSION.zip" | awk '{print $1}')"
+fi
+if [ "$DOWNLOAD_DASHBOARDS" = "true" ] && [ "$WITH_SECURITY" = "true" ]; then
+    echo "SECURITY_DASHBOARDS_SHA512=$(sha512sum "$DEST/securityDashboards-$VERSION.zip" | awk '{print $1}')"
 fi
