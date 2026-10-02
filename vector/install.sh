@@ -21,6 +21,11 @@
 #
 # Konfiguration: Variablen in vector/install.env (siehe install.env.example),
 # per --config <datei> oder als Umgebungsvariablen.
+#
+# Auth/TLS: Existiert BASE_DIR/config/opensearch.security.yml (legt vector/users.sh
+# an), installiert das Skript zusätzlich das Security-Plugin
+# (opensearch-security-<V>.0.zip aus ARTIFACT_DIR) und hängt die Datei an
+# opensearch.yml an.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,6 +68,7 @@ fi
 ARTIFACT_DIR="${ARTIFACT_DIR:-$HOME}"
 OPENSEARCH_VERSION="${OPENSEARCH_VERSION:-}"  # leer = höchste in ARTIFACT_DIR gefundene Version
 KNN_SHA512="${KNN_SHA512:-}"                  # optional: erwartete SHA-512 des k-NN-Zips
+SECURITY_SHA512="${SECURITY_SHA512:-}"        # optional: erwartete SHA-512 des Security-Zips
 
 BASE_DIR="${BASE_DIR:-/opt/local/opensearch}"
 BASE_DIR="${BASE_DIR%/}"
@@ -199,6 +205,14 @@ KNN_VERSION="${OPENSEARCH_VERSION}.0"
 OS_FILE="$(find_artifact "opensearch-min-${OPENSEARCH_VERSION}-linux-${ARCH}.tar.gz")"
 KNN_FILE="$(find_artifact "opensearch-knn-${KNN_VERSION}.zip")"
 
+# Security-Plugin nur, wenn users.sh Auth eingeschaltet hat.
+SECURITY_YML="$CONF_DIR/opensearch.security.yml"
+SECURITY=false
+if [ -f "$SECURITY_YML" ]; then
+    SECURITY=true
+    SECURITY_FILE="$(find_artifact "opensearch-security-${KNN_VERSION}.zip")"
+fi
+
 DIST_DIR="$BASE_DIR/opensearch-$OPENSEARCH_VERSION"
 CURRENT="$BASE_DIR/current"
 
@@ -211,6 +225,7 @@ chmod 0750 "$CONF_DIR" "$DATA_DIR" "$LOG_DIR" "$TMP_DIR"
 
 verify_artifact "$OS_FILE" ""
 verify_artifact "$KNN_FILE" "$KNN_SHA512"
+[ "$SECURITY" = "false" ] || verify_artifact "$SECURITY_FILE" "$SECURITY_SHA512"
 
 # --- 3. Entpacken -------------------------------------------------------------
 
@@ -228,21 +243,37 @@ else
     CHANGED=true
 fi
 
-# --- 4. k-NN-Plugin -----------------------------------------------------------
+# --- 4. Plugins ---------------------------------------------------------------
 
-# Marker außerhalb von plugins/, weil OpenSearch dort jeden Eintrag als Plugin lädt.
-KNN_MARKER="$DIST_DIR/.opensearch-knn.installed"
-KNN_ID="$(sha512sum "$KNN_FILE" | awk '{print $1}')"
-if [ -f "$KNN_MARKER" ] && [ "$(cat "$KNN_MARKER")" = "$KNN_ID" ] \
-    && [ -f "$DIST_DIR/plugins/opensearch-knn/plugin-descriptor.properties" ]; then
-    log "k-NN-Plugin $KNN_VERSION bereits installiert"
-else
-    log "Installiere k-NN-Plugin aus $KNN_FILE"
-    rm -rf "$DIST_DIR/plugins/opensearch-knn" "$KNN_MARKER"
+# install_plugin <name> <zip>: installiert das Plugin, falls es fehlt oder das Zip
+# sich geändert hat. Marker außerhalb von plugins/, weil OpenSearch dort jeden
+# Eintrag als Plugin lädt.
+install_plugin() {
+    local name="$1" file="$2"
+    local marker="$DIST_DIR/.$name.installed" id
+    id="$(sha512sum "$file" | awk '{print $1}')"
+    if [ -f "$marker" ] && [ "$(cat "$marker")" = "$id" ] \
+        && [ -f "$DIST_DIR/plugins/$name/plugin-descriptor.properties" ]; then
+        log "Plugin $name bereits installiert"
+        return
+    fi
+    log "Installiere Plugin $name aus $file"
+    rm -rf "$DIST_DIR/plugins/$name" "$marker"
     # Gegen die Default-Konfiguration der Distribution, nicht gegen CONF_DIR.
     OPENSEARCH_JAVA_HOME="$DIST_DIR/jdk" OPENSEARCH_PATH_CONF="$DIST_DIR/config" \
-        "$DIST_DIR/bin/opensearch-plugin" install --batch "file://$KNN_FILE"
-    echo "$KNN_ID" >"$KNN_MARKER"
+        "$DIST_DIR/bin/opensearch-plugin" install --batch "file://$file"
+    echo "$id" >"$marker"
+    CHANGED=true
+}
+
+install_plugin opensearch-knn "$KNN_FILE"
+
+if [ "$SECURITY" = "true" ]; then
+    install_plugin opensearch-security "$SECURITY_FILE"
+elif [ -d "$DIST_DIR/plugins/opensearch-security" ]; then
+    # Ohne TLS-Konfiguration startet ein Node mit Security-Plugin nicht.
+    log "Entferne Security-Plugin ($SECURITY_YML fehlt)"
+    rm -rf "$DIST_DIR/plugins/opensearch-security" "$DIST_DIR/.opensearch-security.installed"
     CHANGED=true
 fi
 
@@ -304,6 +335,11 @@ transport.port: $TRANSPORT_PORT
 bootstrap.memory_lock: $MEMORY_LOCK
 $DISCOVERY
 EOF
+    if [ "$SECURITY" = "true" ]; then
+        echo
+        echo "# --- aus $SECURITY_YML (vector/users.sh) ---"
+        cat "$SECURITY_YML"
+    fi
     if [ -f "$CONF_DIR/opensearch.local.yml" ]; then
         echo
         echo "# --- aus $CONF_DIR/opensearch.local.yml ---"
@@ -331,6 +367,15 @@ fi
 HEALTH_HOST="$NETWORK_HOST"
 case "$HEALTH_HOST" in 0.0.0.0|_site_|_global_|_local_) HEALTH_HOST=127.0.0.1 ;; esac
 
+# Mit Security authentifizieren sich die Skripte per Admin-Zertifikat (users.sh).
+if [ "$SECURITY" = "true" ]; then
+    SCHEME=https
+    CURL_OPTS="(--cacert \"$CONF_DIR/certs/root-ca.pem\" --cert \"$CONF_DIR/certs/admin.pem\" --key \"$CONF_DIR/certs/admin-key.pem\")"
+else
+    SCHEME=http
+    CURL_OPTS="()"
+fi
+
 # LD_LIBRARY_PATH: Der k-NN-Plugin lädt libopensearchknn_*.so per
 # System.loadLibrary, java.library.path leitet sich unter Linux daraus ab
 # (siehe opensearch-tar-install.sh im Voll-Bundle).
@@ -342,7 +387,9 @@ export OPENSEARCH_JAVA_HOME="$CURRENT/jdk"
 export OPENSEARCH_TMPDIR="$TMP_DIR"
 export LD_LIBRARY_PATH="$CURRENT/plugins/opensearch-knn/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 OPENSEARCH_PIDFILE="$RUN_DIR/opensearch.pid"
-OPENSEARCH_URL="http://$HEALTH_HOST:$HTTP_PORT"
+OPENSEARCH_URL="$SCHEME://$HEALTH_HOST:$HTTP_PORT"
+OPENSEARCH_SECURITY=$SECURITY
+OPENSEARCH_CURL_OPTS=$CURL_OPTS
 OPENSEARCH_LOG="$LOG_DIR/$CLUSTER_NAME.log"
 OPENSEARCH_STARTUP_LOG="$LOG_DIR/startup.log"
 
@@ -383,7 +430,9 @@ fi
 
 echo "Warte auf $OPENSEARCH_URL ..."
 for _ in $(seq 1 60); do
-    if curl -fs "$OPENSEARCH_URL/_cluster/health" >/dev/null 2>&1; then
+    code="$(curl -s -o /dev/null -w '%{http_code}' "${OPENSEARCH_CURL_OPTS[@]}" "$OPENSEARCH_URL/_cluster/health" 2>/dev/null)" || true
+    # Mit Security antwortet der Node vor der Initialisierung mit 503.
+    if [ "$code" = "200" ] || { [ "$OPENSEARCH_SECURITY" = "true" ] && [ "${code:-000}" != "000" ]; }; then
         echo "OpenSearch läuft (PID $(opensearch_pid))"
         exit 0
     fi
@@ -438,8 +487,8 @@ else
     echo "Prozess:  läuft nicht"
     exit 3
 fi
-curl -fs "$OPENSEARCH_URL/_cluster/health?pretty" || { echo "HTTP:     $OPENSEARCH_URL antwortet nicht"; exit 1; }
-curl -fs "$OPENSEARCH_URL/_cat/plugins?v"
+curl -fs "${OPENSEARCH_CURL_OPTS[@]}" "$OPENSEARCH_URL/_cluster/health?pretty" || { echo "HTTP:     $OPENSEARCH_URL antwortet nicht"; exit 1; }
+curl -fs "${OPENSEARCH_CURL_OPTS[@]}" "$OPENSEARCH_URL/_cat/plugins?v"
 EOF
 
 # --- 8. Systemvoraussetzungen prüfen (ändert nichts außerhalb BASE_DIR) -------
@@ -480,6 +529,7 @@ fi
 cat <<EOF
 
 Fertig: OpenSearch $OPENSEARCH_VERSION + k-NN $KNN_VERSION ($KNN_ENGINES) unter $BASE_DIR
+  URL:           $SCHEME://$HEALTH_HOST:$HTTP_PORT (Auth/TLS: $SECURITY)
   Binaries:      $CURRENT -> $DIST_DIR
   Konfiguration: $CONF_DIR (eigene Settings: opensearch.local.yml, jvm.options.d/)
   Daten / Logs:  $DATA_DIR / $LOG_DIR

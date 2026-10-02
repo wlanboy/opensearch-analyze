@@ -142,9 +142,9 @@ deshalb eher ein kleinerer Heap, z.B. `HEAP_SIZE=8g` auf einer 64-GB-Maschine.
 ### Netzwerk, Sicherheit und Systemlimits
 
 Die min-Distribution enthält **kein Security-Plugin**: kein TLS, keine
-Authentifizierung. Deshalb gilt der Default `NETWORK_HOST=127.0.0.1`. Für Zugriff
-von anderen Hosts `NETWORK_HOST` auf die Server-IP setzen und den Zugang per
-Firewall bzw. Netzsegment absichern.
+Authentifizierung. Deshalb gilt der Default `NETWORK_HOST=127.0.0.1`. Auth und TLS
+schaltet [users.sh](users.sh) ein, siehe [Auth und User](#auth-und-user). Ohne
+users.sh den Zugang von anderen Hosts per Firewall bzw. Netzsegment absichern.
 
 Sobald `network.host` keine Loopback-Adresse mehr ist, prüft OpenSearch beim Start
 Systemlimits und bricht ab, wenn sie nicht passen. Das Skript ändert außerhalb von
@@ -180,6 +180,78 @@ INITIAL_CLUSTER_MANAGER_NODES=os-vec-1,os-vec-2,os-vec-3   # node.name der Knote
 gebraucht. Danach sollte die Variable leer sein, siehe
 [Discovery-Doku](https://docs.opensearch.org/latest/tuning-your-cluster/).
 
+## Auth und User
+
+[users.sh](users.sh) installiert das Security-Plugin, schaltet TLS (HTTP und
+Transport) und Basic-Auth ein und legt zwei User an:
+
+| User | Rechte |
+|---|---|
+| `admin` | alles (`all_access` und Security-REST-API) |
+| `agent` | Rolle `vector_agent` auf `AGENT_INDEX_PATTERNS` (Default `*`): Indizes und Mappings anlegen, Dokumente/Vektoren anlegen, ändern, löschen (auch `_delete_by_query`), suchen inkl. k-NN, `_bulk`, `_msearch`. Indizes löschen und Settings ändern darf `agent` **nicht** |
+
+Zusätzlich zu den Dateien aus Abschnitt 1 wird das Security-Plugin gebraucht. Es
+ist reines Java, das Zip von Maven Central passt deshalb:
+
+```bash
+cd ~
+curl -fLO https://repo1.maven.org/maven2/org/opensearch/plugin/opensearch-security/2.19.5.0/opensearch-security-2.19.5.0.zip
+curl -fLO https://repo1.maven.org/maven2/org/opensearch/plugin/opensearch-security/2.19.5.0/opensearch-security-2.19.5.0.zip.sha512
+```
+
+Dann (nach `install.sh`, `users.sh` muss neben `install.sh` liegen):
+
+```bash
+vector/users.sh
+```
+
+Das Skript
+
+1. erzeugt unter `config/certs/` eine eigene CA, ein Node-Zertifikat (SANs:
+   `localhost`, `127.0.0.1`, Hostname, `NETWORK_HOST`, `EXTRA_SANS`) und ein
+   Admin-Zertifikat,
+2. schreibt `config/opensearch.security.yml` (hängt `install.sh` an
+   `opensearch.yml` an) und die Startkonfiguration in `config/opensearch-security/`
+   (ohne Demo-User),
+3. ruft `install.sh --start` auf. Das installiert das Plugin und startet neu.
+4. Danach legt es User, Rolle und Mapping per Security-REST-API an und prüft beide
+   Logins.
+
+Die Passwörter (32 Zeichen, generiert) stehen in `config/users.env` (Modus 0600):
+
+```bash
+source /opt/local/opensearch/config/users.env
+curl --cacert "$OPENSEARCH_CACERT" -u "$OPENSEARCH_AGENT_USER:$OPENSEARCH_AGENT_PASSWORD" \
+  "$OPENSEARCH_URL/_cat/indices?v"
+```
+
+Clients auf anderen Rechnern brauchen `config/certs/root-ca.pem` als CA oder müssen
+die Zertifikatsprüfung abschalten (`curl -k`).
+
+- **Erneut ausführen:** Das ist idempotent. Die Passwörter aus `users.env` werden
+  neu gesetzt, andere User (z.B. von `adduser.sh`) bleiben erhalten.
+- **Passwörter wechseln:** `vector/users.sh --rotate` oder fest vorgeben:
+  `ADMIN_PASSWORD=... AGENT_PASSWORD=... vector/users.sh`
+- **Andere Namen/Indizes:** `ADMIN_USER`, `AGENT_USER`, `AGENT_ROLE` und
+  `AGENT_INDEX_PATTERNS` in `install.env`, z.B. `AGENT_INDEX_PATTERNS=vectors-*,rag-*`
+- **Notzugang:** `bin/start.sh` und `bin/status.sh` authentifizieren sich mit dem
+  Admin-Zertifikat (`config/certs/admin.pem`). Damit lässt sich die Security-API auch
+  ohne Passwort nutzen:
+  `curl --cacert certs/root-ca.pem --cert certs/admin.pem --key certs/admin-key.pem https://127.0.0.1:9200/_plugins/_security/api/internalusers`
+- **Zertifikate erneuern:** `config/certs/node.pem` bzw. `admin.pem` löschen und
+  `users.sh` ausführen. Ein neues Node-Zertifikat gibt es automatisch, wenn sich
+  Hostname, `NETWORK_HOST` oder `EXTRA_SANS` ändern.
+- **Upgrade:** Das Security-Zip der neuen Version gehört mit nach `~`. `install.sh`
+  installiert das Plugin wieder, solange `config/opensearch.security.yml` existiert.
+- **Auth wieder ausschalten:** `config/opensearch.security.yml` löschen und
+  `install.sh --restart` ausführen. Das Plugin wird dann entfernt.
+
+**Mehrknoten-Cluster:** Alle Knoten müssen dieselbe CA nutzen und gleichzeitig auf
+TLS umgestellt werden. Ein Knoten mit TLS und einer ohne TLS finden sich nicht.
+`users.sh` zuerst auf einem Knoten ausführen. Auf den übrigen dann vorher
+`config/certs/root-ca.pem`, `config/certs/root-ca-key.pem` und `config/users.env`
+vom ersten Knoten kopieren und `users.sh` ausführen.
+
 ## Upgrade
 
 Neue Dateien (Tarball + k-NN-Zip der neuen Version) nach `~` legen und
@@ -197,6 +269,7 @@ Daten noch nicht migriert hat. Alte Versionsverzeichnisse räumt man von Hand au
 | `opensearch-<V>/` | Binaries, JDK, Plugins (read-only) |
 | `current` | Symlink auf aktive Version |
 | `config/` | `opensearch.yml`, `opensearch.local.yml`, `jvm.options(.d)`, Keystore |
+| `config/certs/`, `config/opensearch-security/`, `config/users.env` | nur mit `users.sh`: Zertifikate, Security-Startkonfiguration, Passwörter |
 | `data/` | Index-Daten |
 | `logs/` | OpenSearch-Log, GC-Log, `startup.log` |
 | `bin/` | `start.sh`, `stop.sh`, `status.sh`, `env.sh` |

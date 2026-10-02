@@ -219,14 +219,14 @@ curl -s localhost:9200/_plugins/_knn/stats | grep -o '"faiss_initialized":[a-z]*
 curl -s -XDELETE localhost:9200/knn-test
 ```
 
-Die Installation ist damit fertig. Die nächsten beiden Schritte sind optional.
+Die Installation ist damit fertig. Die nächsten Schritte sind optional.
 
 ## Schritt 10 (optional): Zugriff von anderen Rechnern
 
-> **Achtung:** Diese Installation hat **keine Authentifizierung und kein TLS**.
-> Jeder, der Port 9200 erreicht, kann alle Daten lesen und löschen. Nur in einem
-> abgeschotteten Netz öffnen und den Zugriff per Firewall auf bekannte Clients
-> beschränken.
+> **Achtung:** Ohne Schritt 12 hat diese Installation **keine Authentifizierung und
+> kein TLS**. Jeder, der Port 9200 erreicht, kann alle Daten lesen und löschen.
+> Entweder vorher Schritt 12 ausführen oder nur in einem abgeschotteten Netz öffnen
+> und den Zugriff per Firewall auf bekannte Clients beschränken.
 
 In `~/install.env` (als `opensearch`) die IP der VM eintragen:
 
@@ -247,7 +247,8 @@ sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address
 sudo firewall-cmd --reload
 ```
 
-Vom Client aus testen: `curl http://10.0.0.11:9200`
+Vom Client aus testen: `curl http://10.0.0.11:9200` (nach Schritt 12:
+`curl -k -u agent:<passwort> https://10.0.0.11:9200`)
 
 ## Schritt 11 (optional): Automatisch beim Booten starten
 
@@ -265,6 +266,52 @@ und diese Zeile eintragen:
 
 Zum Testen die VM neu starten und danach `/opt/local/opensearch/bin/status.sh`
 aufrufen.
+
+## Schritt 12 (optional): Auth und TLS einschalten
+
+Danach spricht OpenSearch nur noch HTTPS und verlangt einen Login. Es gibt zwei User:
+
+- `admin` darf alles.
+- `agent` darf Vektor-Indizes anlegen und Dokumente anlegen, ändern, löschen und
+  suchen. Indizes löschen darf er nicht.
+
+Das Security-Plugin ins Home-Verzeichnis laden (als `opensearch`, ohne Internet wie
+in Schritt 6 per `scp`):
+
+```bash
+cd ~
+curl -fLO https://repo1.maven.org/maven2/org/opensearch/plugin/opensearch-security/2.19.5.0/opensearch-security-2.19.5.0.zip
+curl -fLO https://repo1.maven.org/maven2/org/opensearch/plugin/opensearch-security/2.19.5.0/opensearch-security-2.19.5.0.zip.sha512
+```
+
+`users.sh` wie in Schritt 7 neben `install.sh` nach `~opensearch/` kopieren
+(`sudo install -o opensearch -g opensearch -m 0755 /tmp/users.sh ~opensearch/users.sh`),
+dann als `opensearch`:
+
+```bash
+~/users.sh
+```
+
+Das Skript erzeugt Zertifikate, installiert das Plugin, startet OpenSearch neu und
+legt die User an. Am Ende steht:
+
+```
+==> Login ok: admin, Rollen ["all_access","security_rest_api_access"]
+==> Login ok: agent, Rollen ["vector_agent"]
+
+Fertig: Auth und TLS aktiv auf https://127.0.0.1:9200
+```
+
+Die Passwörter stehen in `/opt/local/opensearch/config/users.env`. Test:
+
+```bash
+source /opt/local/opensearch/config/users.env
+curl --cacert "$OPENSEARCH_CACERT" -u "$OPENSEARCH_AGENT_USER:$OPENSEARCH_AGENT_PASSWORD" "$OPENSEARCH_URL/_cat/indices?v"
+```
+
+Die Test-Befehle aus Schritt 9 brauchen jetzt `https://`, `--cacert` und `-u`.
+`status.sh` funktioniert ohne Passwort, denn es nutzt das Admin-Zertifikat. Neue
+Passwörter: `~/users.sh --rotate`. Details stehen in der README unter „Auth und User“.
 
 ---
 
@@ -307,6 +354,11 @@ tail -100 /opt/local/opensearch/logs/opensearch-vector.log
 | `BindException: Address already in use` | Port 9200/9300 ist schon belegt (`ss -ltnp \| grep 9200`). Anderen Prozess beenden oder `HTTP_PORT`/`TRANSPORT_PORT` ändern |
 | `OutOfMemoryError` / Prozess verschwindet | `HEAP_SIZE` zu groß für die VM (OOM-Killer: `sudo dmesg \| grep -i oom`). Heap verkleinern |
 | `curl: (7) Failed to connect` von außen | `NETWORK_HOST` nicht gesetzt (Schritt 10) oder Firewall zu |
+| `opensearch-security-2.19.5.0.zip nicht in ... gefunden` | Security-Zip fehlt (Schritt 12) |
+| `curl: (52) Empty reply from server` | Nach Schritt 12 läuft nur noch HTTPS: `https://` verwenden |
+| `curl: (60) SSL certificate problem` | `--cacert /opt/local/opensearch/config/certs/root-ca.pem` angeben (oder `-k`) |
+| `Unauthorized` / HTTP 401 | Falsches Passwort, siehe `config/users.env` |
+| HTTP 403 `no permissions for [indices:admin/delete]` | `agent` darf keine Indizes löschen, als `admin` ausführen |
 | `Es gab Änderungen, OpenSearch läuft noch mit dem alten Stand` | Skript mit `--restart` aufrufen |
 
 ## Deinstallation
