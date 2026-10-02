@@ -1,6 +1,6 @@
 services:
   opensearch-1:
-    image: opensearchproject/opensearch:2.19.5
+    image: opensearchproject/opensearch:3.9.0
     container_name: opensearch-1
     environment:
       - cluster.name=opensearch-cluster
@@ -29,7 +29,7 @@ services:
       retries: 5
 
   opensearch-2:
-    image: opensearchproject/opensearch:2.19.5
+    image: opensearchproject/opensearch:3.9.0
     container_name: opensearch-2
     environment:
       - cluster.name=opensearch-cluster
@@ -76,7 +76,7 @@ services:
     restart: unless-stopped
 
   opensearch-dashboards:
-    image: opensearchproject/opensearch-dashboards:2.19.5
+    image: opensearchproject/opensearch-dashboards:3.9.0
     container_name: opensearch-dashboards
     ports:
       - "5601:5601"
