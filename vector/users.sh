@@ -176,7 +176,7 @@ done
 [ -x "$BASE_DIR/current/bin/opensearch" ] && [ -f "$BIN_DIR/env.sh" ] \
     || die "Keine Installation unter $BASE_DIR, zuerst install.sh ausführen"
 find "$ARTIFACT_DIR" -maxdepth 2 -type f -name 'opensearch-security-*.zip' 2>/dev/null | grep -q . \
-    || die "Kein opensearch-security-<version>.zip in $ARTIFACT_DIR — Download-Link in vector/README.md"
+    || die "Kein opensearch-security-<version>.zip in $ARTIFACT_DIR — laden mit: DOWNLOAD_SECURITY=true $SCRIPT_DIR/download.sh"
 
 mkdir -p "$CERT_DIR" "$SEC_DIR"
 chmod 0750 "$CERT_DIR" "$SEC_DIR"
