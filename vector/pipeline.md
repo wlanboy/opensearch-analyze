@@ -44,7 +44,7 @@ vector/users.sh                # TLS, Auth, User admin/agent/search
 vector/index.sh                # Template + Search-Pipeline (EMBEDDING_DIM in install.env)
 
 # Rauchtest: Test-Chunk einspielen und suchen
-vector/pipeline.sh testdata --out /tmp/batch.ndjson && vector/pipeline.sh bulk /tmp/batch.ndjson
+vector/pipeline.sh testdata --out batch.ndjson && vector/pipeline.sh bulk batch.ndjson
 vector/pipeline.sh search "E-4711"
 ```
 
