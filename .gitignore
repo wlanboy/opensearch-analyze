@@ -2,3 +2,4 @@ __pycache__/
 .env
 vector/install.env
 vector/batch.ndjson
+batch.ndjson
