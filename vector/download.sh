@@ -5,9 +5,12 @@
 #   opensearch-neural-search-<V>.0.zip                (ci.opensearch.org, außer NEURAL_SEARCH=false)
 #   opensearch-security-<V>.0.zip + .sha512           (Maven Central, mit DOWNLOAD_SECURITY=true
 #                                                      oder wenn users.sh Auth eingeschaltet hat)
+#   opensearch-job-scheduler-<V>.0.zip,
+#   opensearch-index-management-<V>.0.zip            (ci.opensearch.org, außer INDEX_MANAGEMENT=false)
 # Mit DOWNLOAD_DASHBOARDS=true zusätzlich für vector/dashboards.sh:
 #   opensearch-dashboards-min-<V>-linux-<arch>.tar.gz + .sha512   (artifacts.opensearch.org)
 #   securityDashboards-<V>.zip   (ci.opensearch.org, nur wenn auch Security geladen wird)
+#   indexManagementDashboards-<V>.zip   (ci.opensearch.org, außer INDEX_MANAGEMENT=false)
 #
 # Die k-NN- und neural-search-Zips kommen aus dem Distribution-Build auf
 # ci.opensearch.org, weil das Zip auf Maven Central keine nativen Libraries
@@ -34,7 +37,7 @@ Usage: $0 [--config <datei>]
   -h, --help        Diese Hilfe
 
 Variablen: ARTIFACT_DIR (Ziel), OPENSEARCH_VERSION (Default $DEFAULT_VERSION),
-DOWNLOAD_ARCH, DOWNLOAD_SECURITY, DOWNLOAD_DASHBOARDS, BUILD_ID, DASHBOARDS_BUILD_ID, NEURAL_SEARCH, KNN_SHA512,
+DOWNLOAD_ARCH, DOWNLOAD_SECURITY, DOWNLOAD_DASHBOARDS, INDEX_MANAGEMENT, BUILD_ID, DASHBOARDS_BUILD_ID, NEURAL_SEARCH, KNN_SHA512,
 NEURAL_SHA512, SECURITY_SHA512, BASE_DIR. Siehe install.env.example.
 EOF
 }
@@ -66,6 +69,7 @@ BUILD_ID="${BUILD_ID:-}"                      # leer = aus dem Manifest auf ci.o
 DOWNLOAD_DASHBOARDS="${DOWNLOAD_DASHBOARDS:-false}" # true = auch OpenSearch Dashboards (dashboards.sh)
 DASHBOARDS_BUILD_ID="${DASHBOARDS_BUILD_ID:-}"      # leer = aus dem Manifest des Dashboards-Builds
 NEURAL_SEARCH="${NEURAL_SEARCH:-auto}"
+INDEX_MANAGEMENT="${INDEX_MANAGEMENT:-auto}"
 BASE_DIR="${BASE_DIR:-/opt/local/opensearch}"
 BASE_DIR="${BASE_DIR%/}"
 
@@ -155,6 +159,9 @@ if [ "$ARCH" != "$HOST_ARCH" ]; then
     NEURAL_SHA512=""
     SECURITY_SHA512=""
     SECURITY_DASHBOARDS_SHA512=""
+    JOB_SCHEDULER_SHA512=""
+    INDEX_MANAGEMENT_SHA512=""
+    INDEX_MANAGEMENT_DASHBOARDS_SHA512=""
 fi
 
 case "$DOWNLOAD_SECURITY" in
@@ -168,6 +175,11 @@ case "$DOWNLOAD_DASHBOARDS" in
     true|false) ;;
     *) die "DOWNLOAD_DASHBOARDS muss true oder false sein (ist: $DOWNLOAD_DASHBOARDS)" ;;
 esac
+case "$INDEX_MANAGEMENT" in
+    auto|true) WITH_ISM=true ;;
+    false) WITH_ISM=false ;;
+    *) die "INDEX_MANAGEMENT muss auto, true oder false sein (ist: $INDEX_MANAGEMENT)" ;;
+esac
 
 mkdir -p "$DEST"
 [ -w "$DEST" ] || die "$DEST ist nicht schreibbar"
@@ -180,8 +192,9 @@ if [ -z "$BUILD_ID" ]; then
 fi
 CI_PLUGINS="$CI_URL/$BUILD_ID/linux/$ARCH/tar/builds/opensearch/plugins"
 
-# Das Dashboards-Plugin securityDashboards kommt aus dem eigenen Dashboards-Build.
-if [ "$DOWNLOAD_DASHBOARDS" = "true" ] && [ "$WITH_SECURITY" = "true" ] && [ -z "$DASHBOARDS_BUILD_ID" ]; then
+# Die Dashboards-Plugins kommen aus dem eigenen Dashboards-Build.
+if [ "$DOWNLOAD_DASHBOARDS" = "true" ] && { [ "$WITH_SECURITY" = "true" ] || [ "$WITH_ISM" = "true" ]; } \
+    && [ -z "$DASHBOARDS_BUILD_ID" ]; then
     DASHBOARDS_BUILD_ID="$(manifest_build_id "$OSD_CI_URL/latest/linux/$ARCH/tar/builds/opensearch-dashboards")"
     [ -n "$DASHBOARDS_BUILD_ID" ] || die "Dashboards-Build-ID für $VERSION nicht gefunden ($OSD_CI_URL/latest/...). Sonst DASHBOARDS_BUILD_ID setzen"
 fi
@@ -199,15 +212,23 @@ case "$NEURAL_SEARCH" in
     *) die "NEURAL_SEARCH muss auto, true oder false sein (ist: $NEURAL_SEARCH)" ;;
 esac
 
+if [ "$WITH_ISM" = "true" ]; then
+    download "$CI_PLUGINS" "opensearch-job-scheduler-$PLUGIN_VERSION.zip" false "${JOB_SCHEDULER_SHA512:-}"
+    download "$CI_PLUGINS" "opensearch-index-management-$PLUGIN_VERSION.zip" false "${INDEX_MANAGEMENT_SHA512:-}"
+fi
+
 if [ "$WITH_SECURITY" = "true" ]; then
     download "$MAVEN_URL/opensearch-security/$PLUGIN_VERSION" "opensearch-security-$PLUGIN_VERSION.zip" true "${SECURITY_SHA512:-}"
 fi
 
 if [ "$DOWNLOAD_DASHBOARDS" = "true" ]; then
     download "$OSD_CORE_URL" "opensearch-dashboards-min-$VERSION-linux-$ARCH.tar.gz" true ""
+    OSD_PLUGINS="$OSD_CI_URL/$DASHBOARDS_BUILD_ID/linux/$ARCH/tar/builds/opensearch-dashboards/plugins"
     if [ "$WITH_SECURITY" = "true" ]; then
-        download "$OSD_CI_URL/$DASHBOARDS_BUILD_ID/linux/$ARCH/tar/builds/opensearch-dashboards/plugins" \
-            "securityDashboards-$VERSION.zip" false "${SECURITY_DASHBOARDS_SHA512:-}"
+        download "$OSD_PLUGINS" "securityDashboards-$VERSION.zip" false "${SECURITY_DASHBOARDS_SHA512:-}"
+    fi
+    if [ "$WITH_ISM" = "true" ]; then
+        download "$OSD_PLUGINS" "indexManagementDashboards-$VERSION.zip" false "${INDEX_MANAGEMENT_DASHBOARDS_SHA512:-}"
     fi
 fi
 
@@ -220,6 +241,13 @@ echo "Fertig. Für install.env (gilt für $ARCH):"
 echo "KNN_SHA512=$(sha512sum "$DEST/opensearch-knn-$PLUGIN_VERSION.zip" | awk '{print $1}')"
 if [ -f "$DEST/opensearch-neural-search-$PLUGIN_VERSION.zip" ] && [ "$NEURAL_SEARCH" != "false" ]; then
     echo "NEURAL_SHA512=$(sha512sum "$DEST/opensearch-neural-search-$PLUGIN_VERSION.zip" | awk '{print $1}')"
+fi
+if [ "$WITH_ISM" = "true" ]; then
+    echo "JOB_SCHEDULER_SHA512=$(sha512sum "$DEST/opensearch-job-scheduler-$PLUGIN_VERSION.zip" | awk '{print $1}')"
+    echo "INDEX_MANAGEMENT_SHA512=$(sha512sum "$DEST/opensearch-index-management-$PLUGIN_VERSION.zip" | awk '{print $1}')"
+fi
+if [ "$DOWNLOAD_DASHBOARDS" = "true" ] && [ "$WITH_ISM" = "true" ]; then
+    echo "INDEX_MANAGEMENT_DASHBOARDS_SHA512=$(sha512sum "$DEST/indexManagementDashboards-$VERSION.zip" | awk '{print $1}')"
 fi
 if [ "$DOWNLOAD_DASHBOARDS" = "true" ] && [ "$WITH_SECURITY" = "true" ]; then
     echo "SECURITY_DASHBOARDS_SHA512=$(sha512sum "$DEST/securityDashboards-$VERSION.zip" | awk '{print $1}')"

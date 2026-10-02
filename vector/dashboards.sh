@@ -9,6 +9,8 @@
 # mit DOWNLOAD_DASHBOARDS=true):
 #   opensearch-dashboards-min-<V>-linux-<arch>.tar.gz   (+ optional .sha512 daneben)
 #   securityDashboards-<V>.zip                          (nur mit users.sh)
+#   indexManagementDashboards-<V>.zip                   (nur, wenn OpenSearch das Plugin
+#                                                        opensearch-index-management hat)
 #
 # Auth/TLS: Hat users.sh Security eingeschaltet (BASE_DIR/bin/env.sh), installiert
 # das Skript das Plugin securityDashboards, legt per Security-REST-API den
@@ -67,6 +69,7 @@ BASE_DIR="${BASE_DIR:-/opt/local/opensearch}"
 BASE_DIR="${BASE_DIR%/}"
 DASHBOARDS_VERSION="${DASHBOARDS_VERSION:-}"            # leer = Version der installierten OpenSearch
 SECURITY_DASHBOARDS_SHA512="${SECURITY_DASHBOARDS_SHA512:-}"
+INDEX_MANAGEMENT_DASHBOARDS_SHA512="${INDEX_MANAGEMENT_DASHBOARDS_SHA512:-}"
 
 DASHBOARDS_DIR="${DASHBOARDS_DIR:-$BASE_DIR/dashboards}"
 DASHBOARDS_DIR="${DASHBOARDS_DIR%/}"
@@ -211,6 +214,12 @@ OSD_FILE="$(find_artifact "opensearch-dashboards-min-${DASHBOARDS_VERSION}-linux
 if [ "$SECURITY" = "true" ]; then
     SECURITY_FILE="$(find_artifact "securityDashboards-${DASHBOARDS_VERSION}.zip")"
 fi
+# Die Index-Verwaltung in Dashboards braucht das Plugin in OpenSearch.
+ISM=false
+if [ -d "$BASE_DIR/current/plugins/opensearch-index-management" ]; then
+    ISM=true
+    ISM_FILE="$(find_artifact "indexManagementDashboards-${DASHBOARDS_VERSION}.zip")"
+fi
 
 DIST_DIR="$DASHBOARDS_DIR/opensearch-dashboards-$DASHBOARDS_VERSION"
 CURRENT="$DASHBOARDS_DIR/current"
@@ -224,6 +233,7 @@ chmod 0750 "$CONF_DIR" "$DATA_DIR" "$LOG_DIR"
 
 verify_artifact "$OSD_FILE" ""
 [ "$SECURITY" = "false" ] || verify_artifact "$SECURITY_FILE" "$SECURITY_DASHBOARDS_SHA512"
+[ "$ISM" = "false" ] || verify_artifact "$ISM_FILE" "$INDEX_MANAGEMENT_DASHBOARDS_SHA512"
 
 # --- 3. Entpacken -------------------------------------------------------------
 
@@ -242,29 +252,44 @@ else
     CHANGED=true
 fi
 
-# --- 4. Plugin securityDashboards ---------------------------------------------
+# --- 4. Plugins --------------------------------------------------------------
 
-PLUGIN=securityDashboards
-MARKER="$DIST_DIR/.$PLUGIN.installed"
-if [ "$SECURITY" = "true" ]; then
-    id="$(sha512sum "$SECURITY_FILE" | awk '{print $1}')"
-    if [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$id" ] && [ -d "$DIST_DIR/plugins/$PLUGIN" ]; then
-        log "Plugin $PLUGIN bereits installiert"
-    else
-        log "Installiere Plugin $PLUGIN aus $SECURITY_FILE"
-        rm -rf "${DIST_DIR:?}/plugins/$PLUGIN" "$MARKER"
-        "$DIST_DIR/bin/opensearch-dashboards-plugin" install --quiet "file://$SECURITY_FILE"
-        echo "$id" >"$MARKER"
-        CHANGED=true
+# install_plugin <name> <zip>: installiert das Plugin, falls es fehlt oder das Zip
+# sich geändert hat.
+install_plugin() {
+    local name="$1" file="$2" marker="$DIST_DIR/.$1.installed" id
+    id="$(sha512sum "$file" | awk '{print $1}')"
+    if [ -f "$marker" ] && [ "$(cat "$marker")" = "$id" ] && [ -d "$DIST_DIR/plugins/$name" ]; then
+        log "Plugin $name bereits installiert"
+        return
     fi
-elif [ -d "$DIST_DIR/plugins/$PLUGIN" ]; then
-    # Ohne Security-Plugin in OpenSearch startet Dashboards mit dem Plugin nicht.
-    log "Entferne Plugin $PLUGIN (OpenSearch läuft ohne Security)"
-    rm -rf "${DIST_DIR:?}/plugins/$PLUGIN" "$MARKER"
+    log "Installiere Plugin $name aus $file"
+    rm -rf "${DIST_DIR:?}/plugins/$name" "$marker"
+    "$DIST_DIR/bin/opensearch-dashboards-plugin" install --quiet "file://$file"
+    echo "$id" >"$marker"
     CHANGED=true
+}
+
+# remove_plugin <name> <grund>
+remove_plugin() {
+    [ -d "$DIST_DIR/plugins/$1" ] || return 0
+    log "Entferne Plugin $1 ($2)"
+    rm -rf "${DIST_DIR:?}/plugins/$1" "$DIST_DIR/.$1.installed"
+    CHANGED=true
+}
+
+if [ "$SECURITY" = "true" ]; then
+    install_plugin securityDashboards "$SECURITY_FILE"
+else
+    # Ohne Security-Plugin in OpenSearch startet Dashboards mit dem Plugin nicht.
+    remove_plugin securityDashboards "OpenSearch läuft ohne Security"
 fi
 
-chmod -R go-w "$DIST_DIR"
+if [ "$ISM" = "true" ]; then
+    install_plugin indexManagementDashboards "$ISM_FILE"
+else
+    remove_plugin indexManagementDashboards "OpenSearch ohne opensearch-index-management"
+fi
 
 # --- 5. Server-User (nur mit Security) ----------------------------------------
 

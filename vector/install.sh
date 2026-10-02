@@ -30,6 +30,10 @@
 # Hybride Suche: Liegt opensearch-neural-search-<V>.0.zip in ARTIFACT_DIR
 # (NEURAL_SEARCH=auto), installiert das Skript auch dieses Plugin. Snapshots
 # landen in SNAPSHOT_DIR (path.repo), angelegt per BASE_DIR/bin/snapshot.sh.
+#
+# Index Management (ISM-Policies, Rollover, Index-Verwaltung in Dashboards):
+# Liegen opensearch-job-scheduler-<V>.0.zip und opensearch-index-management-<V>.0.zip
+# in ARTIFACT_DIR (INDEX_MANAGEMENT=auto), installiert das Skript beide.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,6 +79,9 @@ KNN_SHA512="${KNN_SHA512:-}"                  # optional: erwartete SHA-512 des 
 SECURITY_SHA512="${SECURITY_SHA512:-}"        # optional: erwartete SHA-512 des Security-Zips
 NEURAL_SEARCH="${NEURAL_SEARCH:-auto}"        # auto = installieren, falls das Zip da ist; true; false
 NEURAL_SHA512="${NEURAL_SHA512:-}"            # optional: erwartete SHA-512 des neural-search-Zips
+INDEX_MANAGEMENT="${INDEX_MANAGEMENT:-auto}"  # auto = installieren, falls beide Zips da sind; true; false
+JOB_SCHEDULER_SHA512="${JOB_SCHEDULER_SHA512:-}"        # optional: SHA-512 des job-scheduler-Zips
+INDEX_MANAGEMENT_SHA512="${INDEX_MANAGEMENT_SHA512:-}"  # optional: SHA-512 des index-management-Zips
 
 BASE_DIR="${BASE_DIR:-/opt/local/opensearch}"
 BASE_DIR="${BASE_DIR%/}"
@@ -237,6 +244,26 @@ case "$NEURAL_SEARCH" in
     *) die "NEURAL_SEARCH muss auto, true oder false sein (ist: $NEURAL_SEARCH)" ;;
 esac
 
+# index-management setzt job-scheduler voraus (extendedPlugins).
+JOB_SCHEDULER_NAME="opensearch-job-scheduler-${KNN_VERSION}.zip"
+ISM_NAME="opensearch-index-management-${KNN_VERSION}.zip"
+ISM=false
+case "$INDEX_MANAGEMENT" in
+    true) ISM=true ;;
+    auto)
+        if find "$ARTIFACT_DIR" -maxdepth 2 -type f -name "$JOB_SCHEDULER_NAME" 2>/dev/null | grep -q . \
+            && find "$ARTIFACT_DIR" -maxdepth 2 -type f -name "$ISM_NAME" 2>/dev/null | grep -q .; then
+            ISM=true
+        fi
+        ;;
+    false) ;;
+    *) die "INDEX_MANAGEMENT muss auto, true oder false sein (ist: $INDEX_MANAGEMENT)" ;;
+esac
+if [ "$ISM" = "true" ]; then
+    JOB_SCHEDULER_FILE="$(find_artifact "$JOB_SCHEDULER_NAME")"
+    ISM_FILE="$(find_artifact "$ISM_NAME")"
+fi
+
 DIST_DIR="$BASE_DIR/opensearch-$OPENSEARCH_VERSION"
 CURRENT="$BASE_DIR/current"
 
@@ -254,6 +281,10 @@ verify_artifact "$OS_FILE" ""
 verify_artifact "$KNN_FILE" "$KNN_SHA512"
 [ "$SECURITY" = "false" ] || verify_artifact "$SECURITY_FILE" "$SECURITY_SHA512"
 [ "$NEURAL" = "false" ] || verify_artifact "$NEURAL_FILE" "$NEURAL_SHA512"
+if [ "$ISM" = "true" ]; then
+    verify_artifact "$JOB_SCHEDULER_FILE" "$JOB_SCHEDULER_SHA512"
+    verify_artifact "$ISM_FILE" "$INDEX_MANAGEMENT_SHA512"
+fi
 
 # --- 3. Entpacken -------------------------------------------------------------
 
@@ -309,6 +340,19 @@ if [ -d "$DIST_DIR/plugins/opensearch-neural-search" ]; then
     HYBRID=true
 else
     HYBRID=false
+fi
+
+if [ "$ISM" = "true" ]; then
+    install_plugin opensearch-job-scheduler "$JOB_SCHEDULER_FILE"
+    install_plugin opensearch-index-management "$ISM_FILE"
+elif [ "$INDEX_MANAGEMENT" = "false" ]; then
+    for name in opensearch-index-management opensearch-job-scheduler; do
+        if [ -d "$DIST_DIR/plugins/$name" ]; then
+            log "Entferne Plugin $name (INDEX_MANAGEMENT=false)"
+            rm -rf "${DIST_DIR:?}/plugins/$name" "$DIST_DIR/.$name.installed"
+            CHANGED=true
+        fi
+    done
 fi
 
 if [ "$SECURITY" = "true" ]; then
