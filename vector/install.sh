@@ -26,6 +26,10 @@
 # an), installiert das Skript zusätzlich das Security-Plugin
 # (opensearch-security-<V>.0.zip aus ARTIFACT_DIR) und hängt die Datei an
 # opensearch.yml an.
+#
+# Hybride Suche: Liegt opensearch-neural-search-<V>.0.zip in ARTIFACT_DIR
+# (NEURAL_SEARCH=auto), installiert das Skript auch dieses Plugin. Snapshots
+# landen in SNAPSHOT_DIR (path.repo), angelegt per BASE_DIR/bin/snapshot.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,6 +73,8 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-$HOME}"
 OPENSEARCH_VERSION="${OPENSEARCH_VERSION:-}"  # leer = höchste in ARTIFACT_DIR gefundene Version
 KNN_SHA512="${KNN_SHA512:-}"                  # optional: erwartete SHA-512 des k-NN-Zips
 SECURITY_SHA512="${SECURITY_SHA512:-}"        # optional: erwartete SHA-512 des Security-Zips
+NEURAL_SEARCH="${NEURAL_SEARCH:-auto}"        # auto = installieren, falls das Zip da ist; true; false
+NEURAL_SHA512="${NEURAL_SHA512:-}"            # optional: erwartete SHA-512 des neural-search-Zips
 
 BASE_DIR="${BASE_DIR:-/opt/local/opensearch}"
 BASE_DIR="${BASE_DIR%/}"
@@ -78,6 +84,9 @@ LOG_DIR="$BASE_DIR/logs"
 TMP_DIR="$BASE_DIR/tmp"
 RUN_DIR="$BASE_DIR/run"
 BIN_DIR="$BASE_DIR/bin"
+SNAPSHOT_DIR="${SNAPSHOT_DIR:-$BASE_DIR/snapshots}"
+SNAPSHOT_DIR="${SNAPSHOT_DIR%/}"
+SNAPSHOT_KEEP="${SNAPSHOT_KEEP:-14}"                         # so viele Snapshots behält bin/snapshot.sh
 
 CLUSTER_NAME="${CLUSTER_NAME:-opensearch-vector}"
 NODE_NAME="${NODE_NAME:-$(hostname -s)}"
@@ -213,6 +222,21 @@ if [ -f "$SECURITY_YML" ]; then
     SECURITY_FILE="$(find_artifact "opensearch-security-${KNN_VERSION}.zip")"
 fi
 
+# neural-search (hybrid-Query, Score-Kombination) braucht nur k-NN, kein ml-commons.
+NEURAL_NAME="opensearch-neural-search-${KNN_VERSION}.zip"
+NEURAL=false
+case "$NEURAL_SEARCH" in
+    true) NEURAL=true; NEURAL_FILE="$(find_artifact "$NEURAL_NAME")" ;;
+    auto)
+        if find "$ARTIFACT_DIR" -maxdepth 2 -type f -name "$NEURAL_NAME" 2>/dev/null | grep -q .; then
+            NEURAL=true
+            NEURAL_FILE="$(find_artifact "$NEURAL_NAME")"
+        fi
+        ;;
+    false) ;;
+    *) die "NEURAL_SEARCH muss auto, true oder false sein (ist: $NEURAL_SEARCH)" ;;
+esac
+
 DIST_DIR="$BASE_DIR/opensearch-$OPENSEARCH_VERSION"
 CURRENT="$BASE_DIR/current"
 
@@ -220,12 +244,16 @@ CURRENT="$BASE_DIR/current"
 
 mkdir -p "$BIN_DIR" "$CONF_DIR/jvm.options.d" "$DATA_DIR" "$LOG_DIR" "$TMP_DIR" "$RUN_DIR"
 chmod 0750 "$CONF_DIR" "$DATA_DIR" "$LOG_DIR" "$TMP_DIR"
+mkdir -p "$SNAPSHOT_DIR" 2>/dev/null && [ -w "$SNAPSHOT_DIR" ] \
+    || die "SNAPSHOT_DIR $SNAPSHOT_DIR nicht anlegbar oder nicht schreibbar"
+chmod 0750 "$SNAPSHOT_DIR"
 
 # --- 2. Prüfsummen ------------------------------------------------------------
 
 verify_artifact "$OS_FILE" ""
 verify_artifact "$KNN_FILE" "$KNN_SHA512"
 [ "$SECURITY" = "false" ] || verify_artifact "$SECURITY_FILE" "$SECURITY_SHA512"
+[ "$NEURAL" = "false" ] || verify_artifact "$NEURAL_FILE" "$NEURAL_SHA512"
 
 # --- 3. Entpacken -------------------------------------------------------------
 
@@ -267,6 +295,21 @@ install_plugin() {
 }
 
 install_plugin opensearch-knn "$KNN_FILE"
+
+if [ "$NEURAL" = "true" ]; then
+    install_plugin opensearch-neural-search "$NEURAL_FILE"
+elif [ "$NEURAL_SEARCH" = "false" ] && [ -d "$DIST_DIR/plugins/opensearch-neural-search" ]; then
+    log "Entferne Plugin opensearch-neural-search (NEURAL_SEARCH=false)"
+    rm -rf "$DIST_DIR/plugins/opensearch-neural-search" "$DIST_DIR/.opensearch-neural-search.installed"
+    CHANGED=true
+elif [ ! -d "$DIST_DIR/plugins/opensearch-neural-search" ]; then
+    warn "$NEURAL_NAME nicht in $ARTIFACT_DIR — ohne neural-search keine hybride Suche (siehe README)"
+fi
+if [ -d "$DIST_DIR/plugins/opensearch-neural-search" ]; then
+    HYBRID=true
+else
+    HYBRID=false
+fi
 
 if [ "$SECURITY" = "true" ]; then
     install_plugin opensearch-security "$SECURITY_FILE"
@@ -329,6 +372,7 @@ cluster.name: $CLUSTER_NAME
 node.name: $NODE_NAME
 path.data: $DATA_DIR
 path.logs: $LOG_DIR
+path.repo: ["$SNAPSHOT_DIR"]
 network.host: $NETWORK_HOST
 http.port: $HTTP_PORT
 transport.port: $TRANSPORT_PORT
@@ -392,6 +436,8 @@ OPENSEARCH_SECURITY=$SECURITY
 OPENSEARCH_CURL_OPTS=$CURL_OPTS
 OPENSEARCH_LOG="$LOG_DIR/$CLUSTER_NAME.log"
 OPENSEARCH_STARTUP_LOG="$LOG_DIR/startup.log"
+OPENSEARCH_SNAPSHOT_DIR="$SNAPSHOT_DIR"
+OPENSEARCH_SNAPSHOT_KEEP=$SNAPSHOT_KEEP
 
 opensearch_pid() {
     local pid
@@ -491,6 +537,50 @@ curl -fs "${OPENSEARCH_CURL_OPTS[@]}" "$OPENSEARCH_URL/_cluster/health?pretty" |
 curl -fs "${OPENSEARCH_CURL_OPTS[@]}" "$OPENSEARCH_URL/_cat/plugins?v"
 EOF
 
+write_file "$BIN_DIR/snapshot.sh" 0755 <<'EOF'
+#!/usr/bin/env bash
+# Verwaltet von vector/install.sh — legt einen Snapshot aller Indizes im
+# Repository "backup" (OPENSEARCH_SNAPSHOT_DIR) an und löscht die ältesten, bis
+# nur noch OPENSEARCH_SNAPSHOT_KEEP übrig sind. Für Cron geeignet.
+set -euo pipefail
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "$0")")/env.sh"
+REPO=backup
+
+req() {
+    local method="$1" path="$2" data=() out
+    [ $# -lt 3 ] || data=(-H 'Content-Type: application/json' --data-binary "$3")
+    if ! out="$(curl -sS -f -X "$method" "${OPENSEARCH_CURL_OPTS[@]}" "${data[@]}" \
+        "$OPENSEARCH_URL$path" 2>&1)"; then
+        echo "FEHLER: $method $path: $out" >&2
+        exit 1
+    fi
+    printf '%s' "$out"
+}
+
+# Idempotent: legt das Repository an bzw. bestätigt den Pfad.
+req PUT "/_snapshot/$REPO" "{\"type\": \"fs\", \"settings\": {\"location\": \"$OPENSEARCH_SNAPSHOT_DIR\"}}" >/dev/null
+
+name="snap-$(date +%Y%m%d-%H%M%S)"
+echo "Lege Snapshot $REPO/$name an ..."
+result="$(req PUT "/_snapshot/$REPO/$name?wait_for_completion=true")"
+state="$(grep -o '"state":"[A-Z_]*"' <<<"$result" | head -1 | cut -d'"' -f4)"
+if [ "$state" != "SUCCESS" ]; then
+    echo "FEHLER: Snapshot $name hat Status ${state:-unbekannt}: $result" >&2
+    exit 1
+fi
+echo "Snapshot $name ok"
+
+mapfile -t snaps < <(req GET "/_cat/snapshots/$REPO?h=id&s=start_epoch")
+excess=$(( ${#snaps[@]} - OPENSEARCH_SNAPSHOT_KEEP ))
+for (( i = 0; i < excess; i++ )); do
+    old="$(echo "${snaps[$i]}" | xargs)"
+    [ -n "$old" ] || continue
+    echo "Lösche alten Snapshot $old"
+    req DELETE "/_snapshot/$REPO/$old" >/dev/null
+done
+EOF
+
 # --- 8. Systemvoraussetzungen prüfen (ändert nichts außerhalb BASE_DIR) -------
 
 case "$NETWORK_HOST" in
@@ -529,13 +619,16 @@ fi
 cat <<EOF
 
 Fertig: OpenSearch $OPENSEARCH_VERSION + k-NN $KNN_VERSION ($KNN_ENGINES) unter $BASE_DIR
+  Hybride Suche: $HYBRID (neural-search)
   URL:           $SCHEME://$HEALTH_HOST:$HTTP_PORT (Auth/TLS: $SECURITY)
   Binaries:      $CURRENT -> $DIST_DIR
   Konfiguration: $CONF_DIR (eigene Settings: opensearch.local.yml, jvm.options.d/)
   Daten / Logs:  $DATA_DIR / $LOG_DIR
+  Snapshots:     $SNAPSHOT_DIR (behalte $SNAPSHOT_KEEP, $BIN_DIR/snapshot.sh)
   Heap:          $HEAP
 
 Starten:   $BIN_DIR/start.sh
 Stoppen:   $BIN_DIR/stop.sh
 Status:    $BIN_DIR/status.sh
+Snapshot:  $BIN_DIR/snapshot.sh
 EOF
