@@ -14,6 +14,7 @@ Node-Metriken auswertet und als Text- oder JSON-Report ausgibt.
 | [conf/fluent-bit.conf](conf/fluent-bit.conf) | Fluent-Bit-Konfiguration (Syslog/Kernel-Log → OpenSearch) |
 | [adduser.sh](adduser.sh) | Legt den read-only OpenSearch-User für opensearch-analyze.py an und schreibt ihn nach `.env` |
 | [stress.sh](stress.sh) | Erzeugt Testdaten und teure Queries für lange-Queries-Analyse |
+| [vector/install.sh](vector/install.sh) | Installiert OpenSearch + k-NN-Plugin aus Nexus auf RHEL als systemd-Service ([Doku](vector/README.md)) |
 
 ## Architektur
 
