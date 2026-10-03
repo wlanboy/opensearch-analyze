@@ -394,6 +394,9 @@ server.ssl.certificate: $CERT_DIR/node.pem
 server.ssl.key: $CERT_DIR/node-key.pem
 opensearch.ssl.verificationMode: full
 opensearch.ssl.certificateAuthorities: ["$CERT_DIR/root-ca.pem"]
+# Eigener Client für Multiple Data Sources, erbt opensearch.ssl.* nicht
+data_source.ssl.verificationMode: full
+data_source.ssl.certificateAuthorities: ["$CERT_DIR/root-ca.pem"]
 opensearch.username: "$DASHBOARDS_USER"
 opensearch.password: "$OSD_SERVER_PASSWORD"
 opensearch.requestHeadersAllowlist: ["authorization", "securitytenant"]
