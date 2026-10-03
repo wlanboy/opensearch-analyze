@@ -438,13 +438,18 @@ api_ok "Rollen-Mapping $AGENT_ROLE"
 # Nur lesen: Suchen (inkl. k-NN/hybrid über die Default-Search-Pipeline des
 # Index), Dokumente holen, Mapping ansehen. Schreiben darf der Search-User nicht,
 # denn Handbuchtexte landen ungefiltert im Prompt der Agents.
+# cluster:monitor/main, nodes/info und state braucht Dashboards, wenn der User als
+# Data-Source-Account dient (Version und Plugins abfragen, siehe workspace.md).
 log "Lege Rolle $SEARCH_ROLE an (Index-Muster: $SEARCH_INDEX_PATTERNS)"
 api PUT "/_plugins/_security/api/roles/$SEARCH_ROLE" <<EOF
 {
   "description": "Vektor-Daten nur lesen und suchen (vector/users.sh)",
   "cluster_permissions": [
     "cluster_composite_ops_ro",
-    "indices:data/read/scroll*"
+    "indices:data/read/scroll*",
+    "cluster:monitor/main",
+    "cluster:monitor/nodes/info",
+    "cluster:monitor/state"
   ],
   "index_permissions": [{
     "index_patterns": $(json_list "$SEARCH_INDEX_PATTERNS"),
