@@ -379,6 +379,11 @@ server.name: "$NODE_NAME"
 path.data: $DATA_DIR
 logging.dest: $LOG_DIR/opensearch-dashboards.log
 opensearch.hosts: ["$OPENSEARCH_URL"]
+
+# Features: Multiple Data Sources, Workspaces, Explore
+data_source.enabled: true
+workspace.enabled: true
+explore.enabled: true
 EOF
     if [ "$SECURITY" = "true" ]; then
         cat <<EOF
